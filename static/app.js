@@ -387,6 +387,100 @@ function markHistoryActive(runId) {
   });
 }
 
+/* --- Settings ---------------------------------------------------------- */
+
+async function openSettings() {
+  el("settings-backdrop").hidden = false;
+  el("settings-panel").hidden = false;
+
+  try {
+    const [models, cfg, profile] = await Promise.all([
+      api("/api/models"),
+      api("/api/config"),
+      api("/api/profile"),
+    ]);
+
+    // /api/tags lists local models only, so cloud names come from a curated
+    // list on the server. Grouping makes the speed/privacy trade-off visible.
+    const select = el("model-select");
+    select.innerHTML = "";
+    const groups = [
+      ["Cloud — fast, needs `ollama signin`", models.cloud],
+      ["Installed locally — private, slower", models.local],
+    ];
+    for (const [label, names] of groups) {
+      if (!names.length) continue;
+      const group = document.createElement("optgroup");
+      group.label = label;
+      for (const name of names) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        option.selected = name === cfg.model;
+        group.append(option);
+      }
+      select.append(group);
+    }
+    // A configured-but-absent model (e.g. cloud default while signed out)
+    // would otherwise silently show the wrong selection.
+    if (!Array.from(select.options).some((option) => option.selected)) {
+      const option = document.createElement("option");
+      option.value = cfg.model;
+      option.textContent = `${cfg.model} (not installed)`;
+      option.selected = true;
+      select.prepend(option);
+    }
+    el("model-hint").textContent =
+      `num_ctx ${cfg.num_ctx} · max_tokens ${cfg.max_tokens} · ` +
+      `up to ${cfg.max_concurrent_runs} concurrent runs`;
+
+    el("temperature-slider").value = cfg.temperature;
+    el("temperature-value").textContent = Number(cfg.temperature).toFixed(2);
+
+    el("profile-editor").value = profile.content;
+    el("profile-path").textContent = profile.path.split(/[\\/]/).pop();
+  } catch (error) {
+    toast(`Could not load settings: ${error.message}`);
+  }
+}
+
+function closeSettings() {
+  el("settings-backdrop").hidden = true;
+  el("settings-panel").hidden = true;
+}
+
+async function saveModel() {
+  await api("/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ model: el("model-select").value }),
+  });
+  toast("Model updated");
+  checkHealth();
+}
+
+async function saveTemperature() {
+  await api("/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ temperature: Number(el("temperature-slider").value) }),
+  });
+}
+
+async function saveProfile() {
+  const button = el("profile-save");
+  button.disabled = true;
+  try {
+    await api("/api/profile", {
+      method: "PUT",
+      body: JSON.stringify({ content: el("profile-editor").value }),
+    });
+    toast("Profile saved — applies to the next run");
+  } catch (error) {
+    toast(`Save failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /* --- Theme ------------------------------------------------------------- */
 
 function applyTheme(theme) {
@@ -408,14 +502,31 @@ el("cancel-button").onclick = cancelRun;
 el("copy-button").onclick = copyActive;
 el("download-button").onclick = downloadActive;
 el("theme-toggle").onclick = toggleTheme;
+el("theme-toggle-panel").onclick = toggleTheme;
+
+el("settings-button").onclick = openSettings;
+el("settings-close").onclick = closeSettings;
+el("settings-backdrop").onclick = closeSettings;
+el("model-select").onchange = saveModel;
+el("temperature-slider").oninput = (inputEvent) => {
+  el("temperature-value").textContent = Number(inputEvent.target.value).toFixed(2);
+};
+el("temperature-slider").onchange = saveTemperature;
+el("profile-save").onclick = saveProfile;
 
 document.addEventListener("keydown", (keyEvent) => {
   const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+  if (keyEvent.key === "Escape") {
+    if (!el("settings-panel").hidden) {
+      closeSettings();
+      return;
+    }
+    if (!typing) showView("home");
+  }
   if (keyEvent.key === "/" && !typing) {
     keyEvent.preventDefault();
     el("topic-input").focus();
   }
-  if (keyEvent.key === "Escape" && !typing) showView("home");
 });
 
 applyTheme(localStorage.getItem("seeytu-theme") || "dark");
