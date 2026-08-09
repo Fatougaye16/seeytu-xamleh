@@ -89,6 +89,44 @@ def test_runs_lifecycle(client):
     assert client.get("/api/runs").json() == []
 
 
+def test_archive_contains_every_file_plus_metadata(client):
+    import io
+    import zipfile
+
+    run_id = client.post("/api/run", json={"topic": "zip me"}).json()["run_id"]
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+
+    response = client.get(f"/api/runs/{run_id}/archive")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert run_id in response.headers["content-disposition"]
+
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        names = sorted(archive.namelist())
+        assert len(names) == 8, names
+        assert "run.json" in names
+        # Decision #10: the raw writer response ships with the archive.
+        assert "04-writer-combined.md" in names
+        assert archive.read("01-research-brief.md").decode("utf-8") == "generated body"
+
+
+def test_archive_route_is_not_shadowed_by_the_file_route(client):
+    """`archive` must not be treated as a filename and rejected by the whitelist."""
+    run_id = client.post("/api/run", json={"topic": "ordering"}).json()["run_id"]
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+    assert client.get(f"/api/runs/{run_id}/archive").status_code == 200
+
+
+def test_archive_of_unknown_run_is_404(client):
+    assert client.get("/api/runs/no-such-run-20260101-0000/archive").status_code == 404
+
+
+def test_archive_rejects_traversal(client):
+    assert client.get("/api/runs/..%2F..%2Fetc/archive").status_code in (400, 404)
+
+
 def test_run_single_agent_endpoint(client):
     body = client.post("/api/run/single", json={"topic": "topic", "agent": "research"}).json()
     assert body["agent"] == "scout"
