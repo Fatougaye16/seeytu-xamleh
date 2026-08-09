@@ -36,7 +36,11 @@ def test_unsupported_binary_types_are_refused_clearly():
     for name in ("paper.pdf", "spec.docx", "book.epub"):
         with pytest.raises(resources.UnsupportedResource) as excinfo:
             resources.add("file", name, "irrelevant")
-        assert "parser" in str(excinfo.value) or "Unsupported" in str(excinfo.value)
+        message = str(excinfo.value).lower()
+        # Names the format and says what does work, without naming a library.
+        assert "supported" in message
+        assert name.split(".")[-1] in message
+        assert resources.listing() == []
 
 
 def test_empty_content_is_refused():
@@ -150,12 +154,23 @@ def _resolving_to(monkeypatch, mapping):
     ],
 )
 def test_fetch_refuses_non_public_addresses(monkeypatch, address, label):
-    """SSRF guard: a pasted link must not reach the metadata service or intranet."""
+    """SSRF guard: a pasted link must not reach the metadata service or intranet.
+
+    Asserts the security property — refused, and nothing stored — rather than the
+    wording, so rewriting user-facing copy cannot quietly gut a security test.
+    """
     _public_dns(monkeypatch, address)
     monkeypatch.setattr(config, "ALLOW_PRIVATE_FETCH", False)
+
+    def must_not_be_called(*args, **kwargs):
+        raise AssertionError(f"a request was made to a {label} address")
+
+    monkeypatch.setattr(resources.requests, "get", must_not_be_called)
+
     with pytest.raises(ValueError) as excinfo:
         resources.add("url", "https://looks-harmless.example/page")
-    assert "not a public address" in str(excinfo.value), label
+    assert "private address" in str(excinfo.value).lower(), label
+    assert resources.listing() == [], f"{label} response must not be stored"
 
 
 def test_fetch_allows_private_addresses_only_when_explicitly_enabled(monkeypatch):
@@ -197,7 +212,8 @@ def test_a_redirect_to_a_private_address_is_refused(monkeypatch):
     monkeypatch.setattr(resources.requests, "get", lambda *a, **k: Redirect())
     with pytest.raises(ValueError) as excinfo:
         resources.add("url", "https://public.example/start")
-    assert "not a public address" in str(excinfo.value)
+    assert "private address" in str(excinfo.value).lower()
+    assert resources.listing() == [], "the redirected response must not be stored"
 
 
 def test_redirects_are_not_followed_by_requests_itself(monkeypatch):

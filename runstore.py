@@ -37,7 +37,8 @@ TAB_LABELS = {
     "linkedin": "LinkedIn Post",
     "substack": "Substack Article",
     "notion": "Notion Reference",
-    "combined": "Raw Writer Output",
+    # Shown to readers, so named for them rather than for the pipeline.
+    "combined": "Writer's Full Draft",
 }
 
 _RUN_ID = re.compile(r"^[a-z0-9][a-z0-9\-]{0,119}$")
