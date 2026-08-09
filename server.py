@@ -14,6 +14,7 @@ import agents
 import config
 import prompts
 import runstore
+from textutil import drop_verify_block, strip_markdown
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -292,14 +293,23 @@ def get_run_archive(run_id: str) -> Response:
 
 
 @app.get("/api/runs/{run_id}/{filename}", response_class=PlainTextResponse)
-def get_run_file(run_id: str, filename: str) -> str:
+def get_run_file(run_id: str, filename: str, plain: bool = False) -> str:
+    """One output file. `?plain=1` returns it ready to paste into LinkedIn.
+
+    Stripping happens here rather than in the browser so it reuses the tested
+    textutil functions instead of a second markdown stripper in JavaScript.
+    """
     try:
         path = runstore.safe_run_file(run_id, filename)
     except runstore.UnsafePath as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"No such file: {filename}")
-    return path.read_text(encoding="utf-8")
+
+    content = path.read_text(encoding="utf-8")
+    if plain:
+        return strip_markdown(drop_verify_block(content))
+    return content
 
 
 @app.delete("/api/runs/{run_id}")

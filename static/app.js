@@ -308,6 +308,8 @@ function activeFile() {
 function renderActiveTab() {
   const file = activeFile();
   renderMarkdown(el("result-panel"), file?.content || "");
+  // Plain-text copy only makes sense where you paste into a composer.
+  el("copy-linkedin-button").hidden = state.activeTab !== "linkedin";
 }
 
 async function copyActive() {
@@ -315,6 +317,18 @@ async function copyActive() {
   if (!file) return;
   await navigator.clipboard.writeText(file.content);
   toast("Copied!");
+}
+
+async function copyForLinkedIn() {
+  const file = activeFile();
+  if (!file || !state.run) return;
+  // Stripping happens server-side so there is one tested implementation
+  // rather than a second markdown stripper in JavaScript.
+  const response = await fetch(
+    `/api/runs/${state.run.run_id}/${file.filename}?plain=1`
+  );
+  await navigator.clipboard.writeText(await response.text());
+  toast("Copied as plain text — verify block removed");
 }
 
 function downloadAll() {
@@ -507,6 +521,7 @@ el("topic-input").onkeydown = (keyEvent) => {
 };
 el("cancel-button").onclick = cancelRun;
 el("copy-button").onclick = copyActive;
+el("copy-linkedin-button").onclick = copyForLinkedIn;
 el("download-button").onclick = downloadActive;
 el("download-all-button").onclick = downloadAll;
 el("theme-toggle").onclick = toggleTheme;
