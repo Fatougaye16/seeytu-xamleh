@@ -67,6 +67,24 @@ python run.py --cli --agent research --topic "vector databases for AI"
 Agent names: `research`, `curriculum`, `project`, `writer` (or `scout`, `architect`, `builder`,
 `publisher`).
 
+## My resources
+
+The Scout reads your own material before it falls back on model recall. Add sources in the
+**My resources** view:
+
+| Kind | How | Notes |
+|---|---|---|
+| Markdown / text | drop or browse | 5 MB per file |
+| Link | paste a URL, press Fetch | fetched once, stored as markdown |
+| Note | paste text, name it, Save | good for transcripts and meeting notes |
+
+Toggle a source off to exclude it from the next run. Enabled sources go to the Scout only — later
+agents inherit them through its brief, so the same text isn't sent four times. Everything is stored
+as plain files under `resources_data/`, which is gitignored.
+
+PDF, docx and epub are **not** supported yet: they need parsers that would take the dependency list
+from three to six. The UI says so rather than accepting a file it cannot read.
+
 ## Make it yours
 
 Three files, in the order you'll want them:
