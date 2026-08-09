@@ -1,49 +1,86 @@
-/* Seeytu-Xamleh frontend. Three views, one WebSocket, no build step. */
+/* Seeytu-Xamleh frontend, built to the imported Claude Design UI.
+   Four views behind a nav stack, one WebSocket, no build step. */
+
+/* Icon paths lifted from the design's ICONS map. */
+const ICONS = {
+  scout: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4",
+  architect: "M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z",
+  builder: "M15 12l5.5-5.5a2.8 2.8 0 0 0-4-4L11 8M3 21l6-6M8.5 5.5 18.5 15.5",
+  publisher: "M4 20h4L20 8a2.8 2.8 0 0 0-4-4L4 16v4ZM14 6l4 4",
+  check: "m4 12 5 5L20 6",
+  queued: "M12 8v8M8 12h8",
+  failed: "M15 9l-6 6M9 9l6 6",
+};
 
 const AGENTS = [
-  { key: "scout", emoji: "🔍", name: "The Scout", activity: "Mapping the topic landscape" },
-  { key: "architect", emoji: "📐", name: "The Architect", activity: "Designing the learning path" },
-  { key: "builder", emoji: "🔨", name: "The Builder", activity: "Specifying the capstone project" },
-  { key: "publisher", emoji: "✍️", name: "The Publisher", activity: "Drafting the content" },
+  {
+    key: "scout", name: "The Scout", step: "Agent 01",
+    blurb: "Surveys the field and separates settled ground from open questions.",
+    task: "Surveying sources",
+  },
+  {
+    key: "architect", name: "The Architect", step: "Agent 02",
+    blurb: "Turns the research into an ordered path with checkpoints.",
+    task: "Sequencing modules",
+  },
+  {
+    key: "builder", name: "The Builder", step: "Agent 03",
+    blurb: "Specifies a project that proves you learned the thing.",
+    task: "Drafting the spec",
+  },
+  {
+    key: "publisher", name: "The Publisher", step: "Agent 04",
+    blurb: "Drafts the post, the article, and the reference page.",
+    task: "Waiting on spec",
+  },
 ];
 
 const EXAMPLES = [
-  "How Kafka powers real-time fintech",
-  "Vector databases for AI applications",
-  "Platform engineering with Kubernetes",
-  "Event sourcing in healthcare systems",
-  "How payment rails actually settle",
-  "Feature stores for ML in logistics",
+  "Retrieval-augmented generation",
+  "Kalman filters",
+  "Postgres query planning",
+  "Wolof orthography",
+  "CRDTs",
+  "Options pricing",
 ];
 
-// Targets from the Publisher prompt. Shown, never enforced — you edit these
-// before publishing, so a regeneration to fix length would be wasted effort.
-const WORD_TARGETS = {
-  linkedin: [150, 300],
-  substack: [800, 1500],
+const VIEW_TITLES = {
+  home: "Home",
+  resources: "My resources",
+  pipeline: "Pipeline",
+  results: "Results",
 };
+
+/* Targets from the Publisher prompt — displayed, never enforced. */
+const WORD_TARGETS = { linkedin: [150, 300], substack: [800, 1500] };
 
 const el = (id) => document.getElementById(id);
 
 const state = {
+  view: "home",
+  stack: [],
   runId: null,
   socket: null,
   run: null,
   activeTab: null,
+  topic: "",
   streaming: "",
   thinking: 0,
-  agentStart: null,
+  tokens: 0,
+  agentStates: {},
+  runStart: null,
+  timer: null,
+  resources: [],
+  resourcesAvailable: true,
+  focusBeforeSettings: null,
 };
 
-/* --- Markdown rendering ------------------------------------------------ */
+/* --- Small helpers ----------------------------------------------------- */
 
-marked.setOptions({ breaks: false, gfm: true });
-
-function renderMarkdown(target, markdown) {
-  // Sanitize before inserting: the content is model-generated, and a stray
-  // script tag costs one line to neutralize.
-  target.innerHTML = DOMPurify.sanitize(marked.parse(markdown || ""));
-  target.querySelectorAll("pre code").forEach((block) => hljs.highlightElement(block));
+function svg(path, size, width = 1.8) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="${width}" stroke-linecap="round"
+    stroke-linejoin="round"><path d="${path}"/></svg>`;
 }
 
 function toast(message) {
@@ -52,45 +89,84 @@ function toast(message) {
   node.setAttribute("role", "status");
   node.textContent = message;
   document.body.appendChild(node);
-  setTimeout(() => node.remove(), 1600);
+  setTimeout(() => node.remove(), 1800);
 }
 
-/* --- Views ------------------------------------------------------------- */
+marked.setOptions({ breaks: false, gfm: true });
 
-function showView(name) {
-  ["home", "progress", "results"].forEach((view) => {
-    el(`view-${view}`).classList.toggle("is-active", view === name);
-  });
+function renderMarkdown(target, markdown) {
+  // Model-generated content: sanitize before it becomes HTML.
+  target.innerHTML = DOMPurify.sanitize(marked.parse(markdown || ""));
+  target.querySelectorAll("pre code").forEach((block) => hljs.highlightElement(block));
 }
-
-/* --- API --------------------------------------------------------------- */
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers: options.body ? { "Content-Type": "application/json" } : {},
     ...options,
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({}));
-    throw new Error(detail.detail?.message || detail.detail || response.statusText);
+    const error = new Error(detail.detail?.message || detail.detail || response.statusText);
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
+}
+
+/* --- Navigation -------------------------------------------------------- */
+
+function showView(name, { push = true } = {}) {
+  if (push && name !== state.view) state.stack.push(state.view);
+  state.view = name;
+
+  ["home", "resources", "pipeline", "results"].forEach((view) => {
+    el(`view-${view}`).classList.toggle("is-active", view === name);
+  });
+
+  el("view-title").textContent = VIEW_TITLES[name];
+  el("back-button").hidden = name === "home";
+  el("back-label").textContent = state.stack.length
+    ? VIEW_TITLES[state.stack[state.stack.length - 1]]
+    : "Home";
+
+  const wantsCrumb = name === "pipeline" || name === "results";
+  el("crumb").hidden = !wantsCrumb || !state.topic;
+  el("crumb").textContent = state.topic;
+
+  el("resources-nav").classList.toggle("is-active", name === "resources");
+  window.scrollTo({ top: 0 });
+}
+
+function goBack() {
+  const previous = state.stack.pop() || "home";
+  showView(previous, { push: false });
 }
 
 /* --- Home -------------------------------------------------------------- */
 
 function buildExamples() {
-  el("example-chips").innerHTML = "";
+  const wrap = el("example-chips");
+  wrap.innerHTML = "";
   EXAMPLES.forEach((topic) => {
     const chip = document.createElement("button");
     chip.className = "chip";
     chip.textContent = topic;
     chip.onclick = () => {
       el("topic-input").value = topic;
-      startRun();
+      startRun(topic);
     };
-    el("example-chips").appendChild(chip);
+    wrap.appendChild(chip);
   });
+}
+
+function buildAgentGrid() {
+  el("agent-grid").innerHTML = AGENTS.map((agent) => `
+    <div class="agent-cell">
+      <div class="agent-cell-icon">${svg(ICONS[agent.key], 22)}</div>
+      <div class="agent-cell-name">${agent.name}</div>
+      <div class="agent-cell-blurb">${agent.blurb}</div>
+    </div>`).join("");
 }
 
 async function checkHealth() {
@@ -99,61 +175,125 @@ async function checkHealth() {
     const health = await api("/api/health");
     if (!health.ollama) {
       note.textContent = `${health.error} → ${health.hint || ""}`;
-      note.style.color = "var(--err)";
+      note.classList.add("is-error");
+      el("model-pill").textContent = "no model";
       return;
     }
-    note.textContent = `Model: ${health.model} (${health.mode})`;
-    note.style.color = "var(--text-dim)";
+    note.classList.remove("is-error");
+    note.textContent = "";
+    el("model-pill").textContent = `${health.model} · ${health.mode}`;
   } catch (error) {
     note.textContent = `Backend unreachable: ${error.message}`;
-    note.style.color = "var(--err)";
+    note.classList.add("is-error");
   }
 }
 
-/* --- Progress ---------------------------------------------------------- */
+/* --- Pipeline ---------------------------------------------------------- */
 
-function buildStepTracker() {
-  el("agent-steps").innerHTML = "";
-  AGENTS.forEach((agent) => {
-    const item = document.createElement("li");
-    item.className = "agent-step";
-    item.id = `step-${agent.key}`;
-    item.innerHTML = `
-      <span class="agent-emoji">${agent.emoji}</span>
-      <span>
-        <span class="agent-name">${agent.name}</span><br>
-        <span class="agent-activity">${agent.activity}</span>
-      </span>
-      <span class="agent-state">waiting</span>`;
-    el("agent-steps").appendChild(item);
-  });
+function buildPipelineCards() {
+  state.agentStates = {};
+  el("pipeline-grid").innerHTML = AGENTS.map((agent, index) => {
+    state.agentStates[agent.key] = "queued";
+    return `
+      <div class="pipe-card" id="pipe-${agent.key}">
+        <div class="pipe-top">
+          <span class="pipe-dot">${svg(ICONS[agent.key], 18)}</span>
+          <span class="pipe-state">queued</span>
+        </div>
+        <div>
+          <div class="pipe-step">${agent.step}</div>
+          <div class="pipe-name">${agent.name}</div>
+          <div class="pipe-task">${index === 0 ? agent.task : "Waiting"}</div>
+        </div>
+        <div class="pipe-track"><div class="pipe-bar"></div></div>
+      </div>`;
+  }).join("");
+
+  el("live-body").innerHTML = AGENTS.map((agent) => `
+    <div class="live-entry is-queued" id="live-${agent.key}">
+      <span class="live-mark">${svg(ICONS.queued, 18)}</span>
+      <div class="live-main">
+        <div class="live-name">${agent.name}</div>
+        <div class="live-note">Queued.</div>
+      </div>
+    </div>`).join("");
 }
 
-function markStep(agentKey, status, label) {
-  const node = el(`step-${agentKey}`);
-  if (!node) return;
-  node.classList.toggle("is-running", status === "running");
-  node.classList.toggle("is-done", status === "done");
-  node.classList.toggle("is-failed", status === "failed");
-  node.querySelector(".agent-state").textContent = label;
+function setAgentState(key, status, { task, barWidth } = {}) {
+  state.agentStates[key] = status;
+  const card = el(`pipe-${key}`);
+  if (card) {
+    card.classList.toggle("is-running", status === "running");
+    card.classList.toggle("is-done", status === "done");
+    card.classList.toggle("is-failed", status === "failed");
+    card.querySelector(".pipe-state").textContent =
+      status === "done" ? "complete" : status;
+    if (task) card.querySelector(".pipe-task").textContent = task;
+    if (barWidth !== undefined) card.querySelector(".pipe-bar").style.width = barWidth;
+  }
+
+  const entry = el(`live-${key}`);
+  if (!entry) return;
+  entry.classList.toggle("is-queued", status === "queued");
+  entry.classList.toggle("is-running", status === "running");
+  entry.classList.toggle("is-done", status === "done");
+  entry.classList.toggle("is-failed", status === "failed");
+  const marks = { queued: ICONS.queued, running: ICONS.builder, done: ICONS.check, failed: ICONS.failed };
+  entry.querySelector(".live-mark").innerHTML =
+    svg(marks[status] || ICONS.queued, 18, status === "done" ? 2.2 : 1.8);
+}
+
+function agentEntryBody(key) {
+  return el(`live-${key}`).querySelector(".live-main");
+}
+
+function startTimer() {
+  state.runStart = Date.now();
+  clearInterval(state.timer);
+  state.timer = setInterval(updateMeta, 1000);
+  updateMeta();
+}
+
+function stopTimer() {
+  clearInterval(state.timer);
+  state.timer = null;
+}
+
+function elapsedLabel() {
+  if (!state.runStart) return "0s";
+  const seconds = Math.round((Date.now() - state.runStart) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+function updateMeta() {
+  const done = Object.values(state.agentStates).filter((s) => s === "done").length;
+  el("pipeline-meta").textContent =
+    `${elapsedLabel()} elapsed · ${done} of ${AGENTS.length} agents complete`;
 }
 
 async function startRun(topicOverride) {
-  const topic = (topicOverride || el("topic-input").value).trim();
+  const topic = (topicOverride || el("topic-input").value || "").trim();
   if (!topic) {
     toast("Enter a topic first");
     el("topic-input").focus();
     return;
   }
 
-  buildStepTracker();
+  state.topic = topic;
   state.streaming = "";
   state.thinking = 0;
-  el("live-output").innerHTML = "";
+  state.tokens = 0;
+  buildPipelineCards();
+  el("pipeline-eyebrow").textContent = "Pipeline running";
+  el("pipeline-topic").textContent = topic;
+  el("live-stats").textContent = "starting";
+  el("live-led").style.display = "";
   el("retry-button").hidden = true;
+  el("view-results-button").hidden = true;
   el("cancel-button").hidden = false;
-  el("progress-status").textContent = "Starting…";
-  showView("progress");
+  startTimer();
+  showView("pipeline");
 
   try {
     const { run_id } = await api("/api/run", {
@@ -161,117 +301,125 @@ async function startRun(topicOverride) {
       body: JSON.stringify({ topic }),
     });
     state.runId = run_id;
-    // Remembered so a page reload can re-attach. The server replays the event
-    // buffer, but only if the browser still knows which run to ask for.
     sessionStorage.setItem("seeytu-run", run_id);
     connectSocket(run_id);
   } catch (error) {
-    el("progress-status").textContent = `Could not start: ${error.message}`;
-  }
-}
-
-async function reattachToRunInProgress() {
-  const runId = sessionStorage.getItem("seeytu-run");
-  if (!runId) return;
-
-  try {
-    const runState = await api(`/api/run/${runId}/state`);
-    if (runState.status === "complete") {
-      sessionStorage.removeItem("seeytu-run");
-      return;
-    }
-    if (["queued", "running", "cancelling"].includes(runState.status)) {
-      state.runId = runId;
-      buildStepTracker();
-      el("progress-status").textContent = "Re-attaching to a run already in progress…";
-      showView("progress");
-      connectSocket(runId);
-    }
-  } catch {
-    // The server restarted and forgot the run; nothing to re-attach to.
-    sessionStorage.removeItem("seeytu-run");
+    el("live-stats").textContent = "failed to start";
+    setAgentState("scout", "failed");
+    agentEntryBody("scout").querySelector(".live-note").textContent =
+      `Could not start: ${error.message}`;
+    stopTimer();
   }
 }
 
 function connectSocket(runId) {
-  // The backend buffers every event and replays it on connect, so this cannot
-  // miss anything emitted between POST /api/run and now — and reconnecting
-  // after a refresh recovers the whole run.
+  // The server buffers every event and replays it on connect, so nothing
+  // emitted between POST /api/run and now is lost — and this is also how a
+  // reload re-attaches to a run already in flight.
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${location.host}/ws/pipeline/${runId}`);
   state.socket = socket;
   socket.onmessage = (message) => handleEvent(JSON.parse(message.data));
   socket.onerror = () => {
-    el("progress-status").textContent = "Connection lost. Reload to re-attach to this run.";
+    el("live-stats").textContent = "connection lost — reload to re-attach";
   };
-}
-
-function elapsed() {
-  if (!state.agentStart) return "";
-  return ` · ${Math.round((Date.now() - state.agentStart) / 1000)}s`;
 }
 
 function handleEvent(event) {
   switch (event.type) {
     case "queued":
-      // Waiting on the concurrency cap, not stuck.
-      el("progress-status").textContent =
-        `${event.message} This run starts automatically when a slot frees.`;
+      el("live-stats").textContent = "queued";
+      el("pipeline-eyebrow").textContent = "Waiting for a slot";
+      agentEntryBody("scout").querySelector(".live-note").textContent = event.message;
       break;
 
-    case "agent_start":
+    case "agent_start": {
       state.streaming = "";
       state.thinking = 0;
-      state.agentStart = Date.now();
-      markStep(event.agent, "running", `running ${event.step}/${event.total}`);
-      el("progress-status").textContent =
-        `Agent ${event.step} of ${event.total} is working. Output appears as it is written.`;
+      const agent = AGENTS.find((a) => a.key === event.agent);
+      setAgentState(event.agent, "running", { task: agent?.task, barWidth: "8%" });
+      const body = agentEntryBody(event.agent);
+      body.innerHTML = `
+        <div class="live-name">${agent?.name || event.agent}</div>
+        <div class="live-text"></div>
+        <div class="live-progress"><span></span></div>`;
+      updateMeta();
       break;
+    }
 
     case "agent_thinking":
-      // Reasoning models think before answering. Without this the panel would
-      // sit empty for the whole reasoning phase.
       state.thinking += 1;
-      if (state.thinking % 25 === 0) {
-        el("progress-status").textContent =
-          `Reasoning… ${state.thinking} thought tokens${elapsed()}`;
+      el("live-stats").textContent = `reasoning · ${state.thinking} thought tokens`;
+      break;
+
+    case "agent_token": {
+      state.streaming += event.delta;
+      state.tokens += 1;
+      el("live-stats").textContent = `streaming · ${state.tokens.toLocaleString()} tokens`;
+      const text = agentEntryBody(event.agent).querySelector(".live-text");
+      if (text) renderMarkdown(text, state.streaming);
+      // Rough progress: the bar is a sign of life, not a measurement.
+      const card = el(`pipe-${event.agent}`);
+      if (card) {
+        const pct = Math.min(92, 8 + Math.round(state.streaming.length / 60));
+        card.querySelector(".pipe-bar").style.width = `${pct}%`;
       }
       break;
+    }
 
-    case "agent_token":
-      state.streaming += event.delta;
-      renderMarkdown(el("live-output"), state.streaming);
+    case "agent_complete": {
+      setAgentState(event.agent, "done", { task: "Complete", barWidth: "100%" });
+      const words = event.output.trim().split(/\s+/).length;
+      const body = agentEntryBody(event.agent);
+      const preview = event.output.trim().slice(0, 320);
+      body.innerHTML = `
+        <div class="live-name">${AGENTS.find((a) => a.key === event.agent)?.name}</div>
+        <div class="live-text"></div>
+        <div class="live-chips"><span class="live-chip">${words.toLocaleString()} words</span></div>`;
+      renderMarkdown(
+        body.querySelector(".live-text"),
+        preview + (event.output.length > preview.length ? "…" : "")
+      );
+      updateMeta();
       break;
-
-    case "agent_complete":
-      markStep(event.agent, "done", "✓ done");
-      state.streaming = event.output;
-      renderMarkdown(el("live-output"), state.streaming);
-      break;
+    }
 
     case "pipeline_complete":
+      stopTimer();
       el("cancel-button").hidden = true;
-      el("progress-status").textContent = "Complete.";
+      el("view-results-button").hidden = false;
+      el("pipeline-eyebrow").textContent = "Run complete";
+      el("live-led").style.display = "none";
+      el("live-stats").textContent = `done · ${state.tokens.toLocaleString()} tokens`;
       sessionStorage.removeItem("seeytu-run");
-      loadRun(event.run_id);
+      loadRun(event.run_id, { push: true });
       loadHistory();
       break;
 
     case "cancelled":
+      stopTimer();
       el("cancel-button").hidden = true;
-      el("progress-status").textContent =
-        "Cancelled — nothing was written to disk. Runs are atomic.";
+      el("live-led").style.display = "none";
+      el("pipeline-eyebrow").textContent = "Cancelled";
+      el("live-stats").textContent = "cancelled — nothing written to disk";
       break;
 
     case "error": {
+      stopTimer();
       el("cancel-button").hidden = true;
-      if (event.agent) markStep(event.agent, "failed", "failed");
-      const done = event.completed?.length || 0;
-      el("progress-status").textContent =
-        `${event.message}${event.hint ? ` → ${event.hint}` : ""}` +
-        (done ? `  (${done} agent${done > 1 ? "s" : ""} finished; retry resumes there)` : "");
-      // Runs are atomic, so nothing was written — retry picks up where it broke.
       el("retry-button").hidden = false;
+      el("live-led").style.display = "none";
+      el("pipeline-eyebrow").textContent = "Run failed";
+      el("live-stats").textContent = "failed";
+      if (event.agent) {
+        setAgentState(event.agent, "failed", { task: "Failed" });
+        const body = agentEntryBody(event.agent);
+        body.innerHTML = `
+          <div class="live-name">${AGENTS.find((a) => a.key === event.agent)?.name}</div>
+          <div class="live-note"></div>`;
+        body.querySelector(".live-note").textContent =
+          `${event.message}${event.hint ? ` → ${event.hint}` : ""}`;
+      }
       break;
     }
   }
@@ -280,59 +428,79 @@ function handleEvent(event) {
 async function cancelRun() {
   if (!state.runId) return;
   await api(`/api/run/${state.runId}/cancel`, { method: "POST" });
-  el("progress-status").textContent = "Cancelling…";
+  el("live-stats").textContent = "cancelling…";
 }
 
 async function retryRun() {
   if (!state.runId) return;
   el("retry-button").hidden = true;
   el("cancel-button").hidden = false;
-  el("progress-status").textContent = "Retrying from the failed agent…";
+  el("pipeline-eyebrow").textContent = "Retrying";
+  el("live-led").style.display = "";
+  startTimer();
   try {
     await api(`/api/run/${state.runId}/retry`, { method: "POST" });
-    // The previous socket closed on the error event; the server dropped that
-    // event when preparing the retry, so reconnecting resumes cleanly.
     connectSocket(state.runId);
   } catch (error) {
-    el("progress-status").textContent = `Retry failed: ${error.message}`;
+    el("live-stats").textContent = `retry failed: ${error.message}`;
     el("retry-button").hidden = false;
+    stopTimer();
+  }
+}
+
+async function reattachToRunInProgress() {
+  const runId = sessionStorage.getItem("seeytu-run");
+  if (!runId) return;
+  try {
+    const runState = await api(`/api/run/${runId}/state`);
+    if (!["queued", "running", "cancelling"].includes(runState.status)) {
+      sessionStorage.removeItem("seeytu-run");
+      return;
+    }
+    state.runId = runId;
+    state.topic = runState.topic;
+    buildPipelineCards();
+    el("pipeline-topic").textContent = runState.topic;
+    el("pipeline-eyebrow").textContent = "Re-attaching";
+    startTimer();
+    showView("pipeline", { push: false });
+    connectSocket(runId);
+  } catch {
+    sessionStorage.removeItem("seeytu-run");
   }
 }
 
 /* --- Results ----------------------------------------------------------- */
 
-async function loadRun(runId) {
+async function loadRun(runId, { push = true } = {}) {
   try {
     state.run = await api(`/api/runs/${runId}`);
   } catch (error) {
-    showView("results");
-    el("results-topic").textContent = "Could not open that run";
-    el("results-meta").textContent = error.message;
-    el("result-tabs").innerHTML = "";
-    el("result-panel").textContent = "";
+    toast(`Could not open that run: ${error.message}`);
     return;
   }
+  state.topic = state.run.topic;
   state.activeTab = state.run.files[0]?.key || null;
   el("results-topic").textContent = state.run.topic;
 
   const created = (state.run.created_at || "").slice(0, 16).replace("T", " ");
   el("results-meta").textContent =
-    [created, state.run.model, state.run.mode].filter(Boolean).join(" · ");
+    [`${state.run.files.length} artifacts`, created, state.run.model, state.run.mode]
+      .filter(Boolean).join(" · ");
 
   const warning = el("results-warning");
   if (state.run.missing_sections?.length) {
     warning.hidden = false;
     warning.textContent =
-      `The writer's output could not be split into: ` +
-      `${state.run.missing_sections.join(", ")}. The full response is in the ` +
-      `"Raw Writer Output" tab, so nothing was lost.`;
+      `The writer's output could not be split into: ${state.run.missing_sections.join(", ")}. ` +
+      `The full response is in the "Raw Writer Output" tab, so nothing was lost.`;
   } else {
     warning.hidden = true;
   }
 
   buildTabs();
   renderActiveTab();
-  showView("results");
+  showView("results", { push });
   markHistoryActive(runId);
 }
 
@@ -346,7 +514,7 @@ function buildTabs() {
     tab.className = "tab" + (file.key === state.activeTab ? " is-active" : "");
     tab.setAttribute("role", "tab");
     tab.setAttribute("aria-selected", String(file.key === state.activeTab));
-    tab.title = target ? `Target ${target[0]}–${target[1]} words` : "";
+    if (target) tab.title = `Target ${target[0]}–${target[1]} words`;
     tab.append(document.createTextNode(file.label));
     const count = document.createElement("span");
     count.className = "tab-count" + (off ? " out-of-range" : "");
@@ -368,7 +536,7 @@ function activeFile() {
 function renderActiveTab() {
   const file = activeFile();
   renderMarkdown(el("result-panel"), file?.content || "");
-  // Plain-text copy only makes sense where you paste into a composer.
+  el("active-file").textContent = file?.filename || "";
   el("copy-linkedin-button").hidden = state.activeTab !== "linkedin";
 }
 
@@ -382,20 +550,9 @@ async function copyActive() {
 async function copyForLinkedIn() {
   const file = activeFile();
   if (!file || !state.run) return;
-  // Stripping happens server-side so there is one tested implementation
-  // rather than a second markdown stripper in JavaScript.
-  const response = await fetch(
-    `/api/runs/${state.run.run_id}/${file.filename}?plain=1`
-  );
+  const response = await fetch(`/api/runs/${state.run.run_id}/${file.filename}?plain=1`);
   await navigator.clipboard.writeText(await response.text());
   toast("Copied as plain text — verify block removed");
-}
-
-function downloadAll() {
-  if (!state.run) return;
-  // A plain navigation: the browser handles the zip stream and the
-  // Content-Disposition filename without any blob juggling.
-  window.location.href = `/api/runs/${state.run.run_id}/archive`;
 }
 
 function downloadActive() {
@@ -407,6 +564,11 @@ function downloadActive() {
   link.download = file.filename;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+function downloadAll() {
+  if (!state.run) return;
+  window.location.href = `/api/runs/${state.run.run_id}/archive`;
 }
 
 /* --- History ----------------------------------------------------------- */
@@ -424,10 +586,13 @@ async function loadHistory() {
     list.append(failed);
     return;
   }
-  list.innerHTML = "";
 
+  list.innerHTML = "";
   if (!runs.length) {
-    list.innerHTML = `<li class="empty-state">No runs yet. Pick a topic to start.</li>`;
+    const empty = document.createElement("li");
+    empty.className = "empty-state";
+    empty.textContent = "No runs yet.";
+    list.append(empty);
     return;
   }
 
@@ -436,46 +601,39 @@ async function loadHistory() {
     item.className = "history-item";
     item.dataset.runId = run.run_id;
 
-    // Built with textContent, not innerHTML: run.topic is whatever the user
-    // typed, so interpolating it would be an injection sink — and a topic
-    // containing a quote would break the title attribute regardless.
-    const label = document.createElement("span");
-    const topic = document.createElement("span");
+    // textContent throughout: run.topic is user input, so interpolating it
+    // would be an injection sink and a quote would break the title attribute.
+    const top = document.createElement("div");
+    top.className = "history-top";
+    const dot = document.createElement("span");
+    dot.className = "history-dot";
+    const topic = document.createElement("div");
     topic.className = "history-topic";
     topic.textContent = run.topic;
     topic.title = run.topic;
+    top.append(dot, topic);
+
+    const bottom = document.createElement("div");
+    bottom.className = "history-bottom";
     const date = document.createElement("span");
     date.className = "history-date";
-    date.textContent = (run.created_at || "").slice(0, 16).replace("T", " ");
-    label.append(topic, date);
-
-    const buttons = document.createElement("span");
-    buttons.className = "history-buttons";
+    date.textContent = (run.created_at || "").slice(0, 10);
+    const actions = document.createElement("span");
+    actions.className = "history-actions";
 
     const rerun = document.createElement("button");
-    rerun.className = "history-action";
-    rerun.title = "Re-run this topic (writes a new timestamped folder)";
-    rerun.textContent = "↻";
-    buttons.append(rerun);
-
-    const remove = document.createElement("button");
-    remove.className = "history-action";
-    remove.dataset.act = "delete";
-    remove.title = "Delete";
-    remove.textContent = "×";
-    buttons.append(remove);
-
-    item.append(label, buttons);
-
-    item.onclick = () => loadRun(run.run_id);
-
+    rerun.className = "icon-action";
+    rerun.title = "Re-run — writes a new timestamped folder";
+    rerun.innerHTML = svg("M21 12a9 9 0 1 1-3-6.7M21 3v6h-6", 14, 2);
     rerun.onclick = (clickEvent) => {
       clickEvent.stopPropagation();
-      // A fresh run in a new timestamped folder — the original is untouched, so
-      // output can be compared across prompt revisions.
       startRun(run.topic);
     };
 
+    const remove = document.createElement("button");
+    remove.className = "icon-action is-danger";
+    remove.title = "Delete";
+    remove.innerHTML = svg("M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13", 14, 2);
     remove.onclick = async (clickEvent) => {
       clickEvent.stopPropagation();
       if (!confirm(`Delete "${run.topic}"? This removes the folder from disk.`)) return;
@@ -483,6 +641,11 @@ async function loadHistory() {
       if (state.run?.run_id === run.run_id) showView("home");
       loadHistory();
     };
+
+    actions.append(rerun, remove);
+    bottom.append(date, actions);
+    item.append(top, bottom);
+    item.onclick = () => loadRun(run.run_id);
     list.appendChild(item);
   });
 }
@@ -493,12 +656,158 @@ function markHistoryActive(runId) {
   });
 }
 
+/* --- Resources --------------------------------------------------------- */
+
+async function loadResources() {
+  const list = el("res-list");
+  try {
+    const payload = await api("/api/resources");
+    state.resources = payload.resources;
+    state.resourcesAvailable = true;
+    el("dropzone-hint").textContent = payload.hint;
+  } catch (error) {
+    state.resourcesAvailable = false;
+    list.innerHTML = "";
+    const empty = document.createElement("li");
+    empty.className = "empty-state";
+    empty.textContent =
+      error.status === 404
+        ? "Resources are not wired up in this build yet."
+        : `Could not load resources: ${error.message}`;
+    list.append(empty);
+    return;
+  }
+  renderResources();
+}
+
+function renderResources() {
+  const list = el("res-list");
+  const active = state.resources.filter((r) => r.enabled).length;
+  el("resource-count").textContent = String(state.resources.length);
+  el("res-stats").textContent =
+    `${active} of ${state.resources.length} active · ` +
+    `${state.resources.reduce((sum, r) => sum + (r.words || 0), 0).toLocaleString()} words`;
+
+  list.innerHTML = "";
+  if (!state.resources.length) {
+    const empty = document.createElement("li");
+    empty.className = "empty-state";
+    empty.textContent = "Nothing yet. Add a file, a link, or a note above.";
+    list.append(empty);
+    return;
+  }
+
+  state.resources.forEach((resource) => {
+    const row = document.createElement("li");
+    row.className = "res-row" + (resource.enabled ? "" : " is-off");
+
+    const kind = document.createElement("span");
+    kind.className = "res-kind";
+    kind.textContent = resource.kind;
+
+    const main = document.createElement("div");
+    main.className = "res-main";
+    const name = document.createElement("div");
+    name.className = "res-name";
+    name.textContent = resource.name;
+    name.title = resource.name;
+    const meta = document.createElement("div");
+    meta.className = "res-meta";
+    meta.textContent = resource.meta;
+    main.append(name, meta);
+
+    const status = document.createElement("span");
+    status.className = "res-status" + (resource.error ? " is-error" : "");
+    status.textContent = resource.error || "Ready";
+
+    const toggle = document.createElement("button");
+    toggle.className = "switch" + (resource.enabled ? " is-on" : "");
+    toggle.title = "Include in runs";
+    toggle.setAttribute("aria-pressed", String(resource.enabled));
+    toggle.innerHTML = "<span></span>";
+    toggle.onclick = async () => {
+      await api(`/api/resources/${resource.id}/toggle`, { method: "POST" });
+      loadResources();
+    };
+
+    const remove = document.createElement("button");
+    remove.className = "icon-action is-danger";
+    remove.title = "Remove";
+    remove.innerHTML = svg("M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13", 15, 1.8);
+    remove.onclick = async () => {
+      if (!confirm(`Remove "${resource.name}" from the library?`)) return;
+      await api(`/api/resources/${resource.id}`, { method: "DELETE" });
+      loadResources();
+    };
+
+    row.append(kind, main, status, toggle, remove);
+    list.appendChild(row);
+  });
+}
+
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  for (const file of files) {
+    try {
+      const text = await file.text();
+      await api("/api/resources", {
+        method: "POST",
+        body: JSON.stringify({ kind: "file", name: file.name, content: text }),
+      });
+    } catch (error) {
+      toast(`${file.name}: ${error.message}`);
+    }
+  }
+  loadResources();
+}
+
+async function addLink() {
+  const url = el("link-input").value.trim();
+  if (!url) return;
+  const button = el("link-button");
+  button.disabled = true;
+  button.textContent = "Fetching…";
+  try {
+    await api("/api/resources", {
+      method: "POST",
+      body: JSON.stringify({ kind: "url", name: url }),
+    });
+    el("link-input").value = "";
+    loadResources();
+  } catch (error) {
+    toast(`Could not fetch: ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Fetch";
+  }
+}
+
+async function addNote() {
+  const content = el("note-input").value.trim();
+  const name = el("note-name").value.trim() || "Pasted note";
+  if (!content) {
+    toast("Paste some text first");
+    return;
+  }
+  try {
+    await api("/api/resources", {
+      method: "POST",
+      body: JSON.stringify({ kind: "note", name, content }),
+    });
+    el("note-input").value = "";
+    el("note-name").value = "";
+    loadResources();
+  } catch (error) {
+    toast(`Could not save: ${error.message}`);
+  }
+}
+
 /* --- Settings ---------------------------------------------------------- */
 
 async function openSettings() {
   state.focusBeforeSettings = document.activeElement;
-  el("settings-backdrop").hidden = false;
-  el("settings-panel").hidden = false;
+  el("settings-layer").hidden = false;
   el("settings-close").focus();
 
   try {
@@ -508,30 +817,25 @@ async function openSettings() {
       api("/api/profile"),
     ]);
 
-    // /api/tags lists local models only, so cloud names come from a curated
-    // list on the server. Grouping makes the speed/privacy trade-off visible.
     const select = el("model-select");
     select.innerHTML = "";
-    const groups = [
+    for (const [label, names] of [
       ["Cloud — fast, needs `ollama signin`", models.cloud],
       ["Installed locally — private, slower", models.local],
-    ];
-    for (const [label, names] of groups) {
+    ]) {
       if (!names.length) continue;
       const group = document.createElement("optgroup");
       group.label = label;
-      for (const name of names) {
+      names.forEach((name) => {
         const option = document.createElement("option");
         option.value = name;
         option.textContent = name;
         option.selected = name === cfg.model;
         group.append(option);
-      }
+      });
       select.append(group);
     }
-    // A configured-but-absent model (e.g. cloud default while signed out)
-    // would otherwise silently show the wrong selection.
-    if (!Array.from(select.options).some((option) => option.selected)) {
+    if (!Array.from(select.options).some((o) => o.selected)) {
       const option = document.createElement("option");
       option.value = cfg.model;
       option.textContent = `${cfg.model} (not installed)`;
@@ -539,12 +843,9 @@ async function openSettings() {
       select.prepend(option);
     }
     el("model-hint").textContent =
-      `num_ctx ${cfg.num_ctx} · max_tokens ${cfg.max_tokens} · ` +
-      `up to ${cfg.max_concurrent_runs} concurrent runs`;
+      `Applies to all four agents · num_ctx ${cfg.num_ctx} · max_tokens ${cfg.max_tokens}`;
 
-    el("temperature-slider").value = cfg.temperature;
-    el("temperature-value").textContent = Number(cfg.temperature).toFixed(2);
-
+    setTemperature(cfg.temperature);
     el("profile-editor").value = profile.content;
     el("profile-path").textContent = profile.path.split(/[\\/]/).pop();
   } catch (error) {
@@ -553,41 +854,36 @@ async function openSettings() {
 }
 
 function closeSettings() {
-  el("settings-backdrop").hidden = true;
-  el("settings-panel").hidden = true;
-  // Return focus where it was, so keyboard users are not dumped at the top.
+  el("settings-layer").hidden = true;
   state.focusBeforeSettings?.focus?.();
 }
 
-async function saveModel() {
-  await api("/api/config", {
-    method: "PUT",
-    body: JSON.stringify({ model: el("model-select").value }),
-  });
-  toast("Model updated");
-  checkHealth();
+function setTemperature(value) {
+  const pct = `${Math.round(Number(value) * 100)}%`;
+  el("temperature-slider").value = value;
+  el("temperature-value").textContent = Number(value).toFixed(2);
+  el("temp-fill").style.width = pct;
+  el("temp-knob").style.left = pct;
 }
 
-async function saveTemperature() {
-  await api("/api/config", {
-    method: "PUT",
-    body: JSON.stringify({ temperature: Number(el("temperature-slider").value) }),
-  });
-}
-
-async function saveProfile() {
-  const button = el("profile-save");
-  button.disabled = true;
+async function saveSettings() {
   try {
+    await api("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        model: el("model-select").value,
+        temperature: Number(el("temperature-slider").value),
+      }),
+    });
     await api("/api/profile", {
       method: "PUT",
       body: JSON.stringify({ content: el("profile-editor").value }),
     });
-    toast("Profile saved — applies to the next run");
+    toast("Saved — applies to the next run");
+    checkHealth();
+    closeSettings();
   } catch (error) {
     toast(`Save failed: ${error.message}`);
-  } finally {
-    button.disabled = false;
   }
 }
 
@@ -596,10 +892,9 @@ async function saveProfile() {
 function applyTheme(theme) {
   document.body.classList.toggle("light", theme === "light");
   localStorage.setItem("seeytu-theme", theme);
-}
-
-function toggleTheme() {
-  applyTheme(document.body.classList.contains("light") ? "dark" : "light");
+  document.querySelectorAll("#theme-segmented button").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.theme === theme);
+  });
 }
 
 /* --- Wiring ------------------------------------------------------------ */
@@ -608,43 +903,82 @@ el("start-button").onclick = () => startRun();
 el("topic-input").onkeydown = (keyEvent) => {
   if (keyEvent.key === "Enter") startRun();
 };
+el("new-topic-button").onclick = () => {
+  el("topic-input").value = "";
+  showView("home");
+  el("topic-input").focus();
+};
+el("resources-nav").onclick = () => {
+  showView("resources");
+  loadResources();
+};
+el("back-button").onclick = goBack;
 el("cancel-button").onclick = cancelRun;
 el("retry-button").onclick = retryRun;
+el("view-results-button").onclick = () => state.runId && loadRun(state.runId);
+
 el("copy-button").onclick = copyActive;
 el("copy-linkedin-button").onclick = copyForLinkedIn;
 el("download-button").onclick = downloadActive;
 el("download-all-button").onclick = downloadAll;
-el("theme-toggle").onclick = toggleTheme;
-el("theme-toggle-panel").onclick = toggleTheme;
 
 el("settings-button").onclick = openSettings;
 el("settings-close").onclick = closeSettings;
 el("settings-backdrop").onclick = closeSettings;
-el("model-select").onchange = saveModel;
-el("temperature-slider").oninput = (inputEvent) => {
-  el("temperature-value").textContent = Number(inputEvent.target.value).toFixed(2);
+el("settings-save").onclick = saveSettings;
+el("settings-reset").onclick = () => {
+  setTemperature(0.7);
+  toast("Reset — press Save to apply");
 };
-el("temperature-slider").onchange = saveTemperature;
-el("profile-save").onclick = saveProfile;
+el("temperature-slider").oninput = (inputEvent) => setTemperature(inputEvent.target.value);
+el("theme-segmented").onclick = (clickEvent) => {
+  const theme = clickEvent.target.closest("button")?.dataset.theme;
+  if (theme) applyTheme(theme);
+};
+
+el("browse-button").onclick = () => el("file-input").click();
+el("file-input").onchange = (changeEvent) => uploadFiles(changeEvent.target.files);
+el("link-button").onclick = addLink;
+el("note-button").onclick = addNote;
+
+const dropzone = el("dropzone");
+["dragenter", "dragover"].forEach((type) =>
+  dropzone.addEventListener(type, (dragEvent) => {
+    dragEvent.preventDefault();
+    dropzone.classList.add("is-over");
+  })
+);
+["dragleave", "drop"].forEach((type) =>
+  dropzone.addEventListener(type, () => dropzone.classList.remove("is-over"))
+);
+dropzone.addEventListener("drop", (dropEvent) => {
+  dropEvent.preventDefault();
+  uploadFiles(dropEvent.dataTransfer?.files);
+});
 
 document.addEventListener("keydown", (keyEvent) => {
   const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
   if (keyEvent.key === "Escape") {
-    if (!el("settings-panel").hidden) {
+    if (!el("settings-layer").hidden) {
       closeSettings();
       return;
     }
-    if (!typing) showView("home");
+    if (!typing && state.view !== "home") goBack();
   }
   if (keyEvent.key === "/" && !typing) {
     keyEvent.preventDefault();
+    showView("home");
     el("topic-input").focus();
   }
 });
 
 applyTheme(localStorage.getItem("seeytu-theme") || "dark");
 buildExamples();
-buildStepTracker();
+buildAgentGrid();
+buildPipelineCards();
+showView("home", { push: false });
+el("sidebar-foot").textContent = `local · ${location.host}`;
 checkHealth();
 loadHistory();
+loadResources();
 reattachToRunInProgress();
