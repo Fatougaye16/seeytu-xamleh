@@ -97,6 +97,24 @@ def split_writer_output(text: str) -> tuple[dict[str, str], list[str]]:
     return sections, missing
 
 
+_VERIFY_HEADING = re.compile(
+    r"^\s{0,3}#{1,6}\s*verify\s+before\s+publishing\b.*$", re.I | re.M
+)
+
+
+def drop_verify_block(markdown: str) -> str:
+    """Remove the trailing "Verify before publishing" section.
+
+    That block exists for the author, not the audience — pasting your own
+    fact-checking list into LinkedIn would be absurd. Everything from the
+    heading onward goes, since the block is always last.
+    """
+    match = _VERIFY_HEADING.search(markdown)
+    if not match:
+        return markdown
+    return markdown[: match.start()].rstrip().rstrip("-").rstrip()
+
+
 def _visible_text(markdown: str) -> str:
     """Strip fenced code and markdown syntax, leaving prose."""
     without_code = re.sub(r"```.*?```|~~~.*?~~~", " ", markdown, flags=re.S)

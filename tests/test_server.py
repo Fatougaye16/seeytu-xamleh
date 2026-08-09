@@ -127,6 +127,38 @@ def test_archive_rejects_traversal(client):
     assert client.get("/api/runs/..%2F..%2Fetc/archive").status_code in (400, 404)
 
 
+def test_plain_query_strips_markdown_and_the_verify_block(client, monkeypatch):
+    """The LinkedIn copy button pastes straight into LinkedIn."""
+
+    def fake_call_model(
+        system, user, *, model, temperature,
+        on_token=None, on_thinking=None, should_cancel=None,
+    ):
+        if "## LINKEDIN" in system:
+            return (
+                "## LINKEDIN\n**Bold** hook with `code` and [a link](http://x.dev).\n\n"
+                "## Verify before publishing\n- Verify the invented statistic.\n\n"
+                "## SUBSTACK\narticle\n\n## NOTION\nreference"
+            )
+        return "body"
+
+    monkeypatch.setattr(agents, "call_model", fake_call_model)
+    run_id = client.post("/api/run", json={"topic": "plain text"}).json()["run_id"]
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+
+    raw = client.get(f"/api/runs/{run_id}/04-linkedin-post.md").text
+    assert "**Bold**" in raw and "Verify before publishing" in raw
+
+    plain = client.get(f"/api/runs/{run_id}/04-linkedin-post.md?plain=1").text
+    assert "**" not in plain
+    assert "`" not in plain
+    assert "](" not in plain
+    assert "Bold hook with code and a link." in plain
+    assert "Verify before publishing" not in plain
+    assert "invented statistic" not in plain
+
+
 def test_run_single_agent_endpoint(client):
     body = client.post("/api/run/single", json={"topic": "topic", "agent": "research"}).json()
     assert body["agent"] == "scout"

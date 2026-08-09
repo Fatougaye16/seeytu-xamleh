@@ -1,6 +1,12 @@
 import pytest
 
-from textutil import slugify, split_writer_output, strip_markdown, word_count
+from textutil import (
+    drop_verify_block,
+    slugify,
+    split_writer_output,
+    strip_markdown,
+    word_count,
+)
 
 
 @pytest.mark.parametrize(
@@ -113,6 +119,38 @@ this = "code should not count"
 """
     # "Heading Here" (2) + "Three real words." (3) + "bullet one" (2)
     assert word_count(md) == 7
+
+
+def test_drop_verify_block_removes_the_trailing_section():
+    """You do not paste your own fact-checking list into LinkedIn."""
+    md = (
+        "The actual post body.\n\nA second paragraph.\n\n"
+        "## Verify before publishing\n"
+        "- Verify the Stripe claim.\n- Verify the latency figure.\n"
+    )
+    result = drop_verify_block(md)
+    assert "Verify before publishing" not in result
+    assert "Stripe claim" not in result
+    assert result.strip().endswith("A second paragraph.")
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["## Verify before publishing", "### VERIFY BEFORE PUBLISHING", "## Verify Before Publishing"],
+)
+def test_drop_verify_block_is_case_and_level_insensitive(heading):
+    md = f"body\n\n{heading}\n- a claim\n"
+    assert drop_verify_block(md).strip() == "body"
+
+
+def test_drop_verify_block_leaves_text_without_one_untouched():
+    md = "Just a post.\n\n## Some other heading\ncontent\n"
+    assert drop_verify_block(md) == md
+
+
+def test_drop_verify_block_also_removes_a_trailing_rule():
+    md = "body\n\n## Verify before publishing\n- claim\n\n---\n"
+    assert drop_verify_block(md).strip() == "body"
 
 
 def test_strip_markdown_produces_plain_text():
