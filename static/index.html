@@ -2,11 +2,128 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Seeytu — Explore. Learn. Publish.</title>
+  <link rel="stylesheet" href="/static/vendor/highlight-theme.css">
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <h1>Seeytu-Xamleh</h1>
-  <p>Explore. Learn. Publish.</p>
-  <p>The interface arrives in tasks 9 and 10.</p>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <span class="brand-mark">S</span>
+      <span class="sidebar-title">History</span>
+    </div>
+    <ul id="history-list" class="history-list"></ul>
+  </aside>
+
+  <main id="main">
+    <header id="app-header">
+      <div>
+        <h1>Seeytu-Xamleh</h1>
+        <p class="tagline">
+          Explore. Learn. Publish.
+          <span class="muted">— Wolof: “explore and teach”</span>
+        </p>
+      </div>
+      <div class="header-actions">
+        <button id="theme-toggle" class="icon-button" title="Toggle theme"
+                aria-label="Toggle light and dark theme">◐</button>
+        <button id="settings-button" class="icon-button" title="Settings"
+                aria-label="Open settings">⚙</button>
+      </div>
+    </header>
+
+    <!-- 1. Home -->
+    <section id="view-home" class="view is-active" aria-label="New topic">
+      <h2 class="prompt-label">What do you want to learn about?</h2>
+      <div class="input-row">
+        <label class="visually-hidden" for="topic-input">Topic</label>
+        <input id="topic-input" type="text" autocomplete="off"
+               placeholder="e.g. how vector databases actually work">
+        <button id="start-button" class="primary">Start Learning</button>
+      </div>
+      <div id="example-chips" class="chips"></div>
+      <p id="health-note" class="health-note" aria-live="polite"></p>
+    </section>
+
+    <!-- 2. Pipeline progress -->
+    <section id="view-progress" class="view" aria-label="Pipeline progress">
+      <ol id="agent-steps" class="agent-steps"></ol>
+      <div class="progress-actions">
+        <span id="progress-status" class="muted" aria-live="polite"></span>
+        <span class="progress-buttons">
+          <button id="retry-button" class="ghost" hidden>Retry from failed agent</button>
+          <button id="cancel-button" class="ghost">Cancel run</button>
+        </span>
+      </div>
+      <article id="live-output" class="markdown"></article>
+    </section>
+
+    <!-- 3. Results -->
+    <section id="view-results" class="view" aria-label="Results">
+      <div class="results-head">
+        <div>
+          <h2 id="results-topic"></h2>
+          <p id="results-meta" class="muted small"></p>
+        </div>
+        <div class="results-actions">
+          <button id="copy-linkedin-button" class="ghost" hidden>Copy for LinkedIn</button>
+          <button id="copy-button" class="ghost">Copy markdown</button>
+          <button id="download-button" class="ghost">Download .md</button>
+          <button id="download-all-button" class="ghost">Download all (.zip)</button>
+        </div>
+      </div>
+      <p id="results-warning" class="warning" hidden></p>
+      <p class="verify-note">
+        Every draft ends with a <strong>Verify before publishing</strong> block. No model here
+        has web access — check those claims before anything goes out under your name.
+      </p>
+      <nav id="result-tabs" class="tabs" role="tablist"></nav>
+      <article id="result-panel" class="markdown" role="tabpanel"></article>
+    </section>
+  </main>
+
+  <!-- Settings slide-over -->
+  <div id="settings-backdrop" class="backdrop" hidden></div>
+  <aside id="settings-panel" class="panel" hidden aria-label="Settings">
+    <div class="panel-head">
+      <h2>Settings</h2>
+      <button id="settings-close" class="icon-button" aria-label="Close settings">✕</button>
+    </div>
+
+    <label class="field">
+      <span class="field-label">Model</span>
+      <select id="model-select"></select>
+      <span class="field-hint" id="model-hint"></span>
+    </label>
+
+    <label class="field">
+      <span class="field-label">
+        Temperature <output id="temperature-value">0.7</output>
+      </span>
+      <input id="temperature-slider" type="range" min="0" max="1" step="0.05" value="0.7">
+      <span class="field-hint">Lower is more literal, higher is more inventive.</span>
+    </label>
+
+    <div class="field">
+      <span class="field-label">My profile</span>
+      <textarea id="profile-editor" rows="16" spellcheck="false"></textarea>
+      <span class="field-hint">
+        Injected into every agent prompt. Saved to <code id="profile-path">profile.md</code>.
+        Cloud mode transmits this to Ollama's servers.
+      </span>
+      <button id="profile-save" class="primary small">Save profile</button>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Theme</span>
+      <button id="theme-toggle-panel" class="ghost">Switch light / dark</button>
+    </div>
+  </aside>
+
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/vendor/highlight.min.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>
