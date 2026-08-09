@@ -810,14 +810,27 @@ async function openSettings() {
   el("settings-layer").hidden = false;
   el("settings-close").focus();
 
-  try {
-    const [models, cfg, profile] = await Promise.all([
-      api("/api/models"),
-      api("/api/config"),
-      api("/api/profile"),
-    ]);
+  // /api/models queries Ollama and takes seconds; /api/config and /api/profile
+  // are instant. Awaiting all three together left the whole panel blank for as
+  // long as the slowest one, so they are populated independently.
+  const modelsPromise = api("/api/models");
+  const select = el("model-select");
+  select.innerHTML = "";
+  const loading = document.createElement("option");
+  loading.textContent = "Loading models…";
+  select.append(loading);
+  select.disabled = true;
 
-    const select = el("model-select");
+  try {
+    const [cfg, profile] = await Promise.all([api("/api/config"), api("/api/profile")]);
+    setTemperature(cfg.temperature);
+    el("profile-editor").value = profile.content;
+    el("profile-path").textContent = profile.path.split(/[\\/]/).pop();
+    el("model-hint").textContent =
+      `Applies to all four agents · num_ctx ${cfg.num_ctx} · max_tokens ${cfg.max_tokens}`;
+
+    const models = await modelsPromise;
+    select.disabled = false;
     select.innerHTML = "";
     for (const [label, names] of [
       ["Cloud — fast, needs `ollama signin`", models.cloud],
@@ -835,6 +848,8 @@ async function openSettings() {
       });
       select.append(group);
     }
+    // A configured-but-absent model (the cloud default while signed out) would
+    // otherwise leave the dropdown showing something other than what will run.
     if (!Array.from(select.options).some((o) => o.selected)) {
       const option = document.createElement("option");
       option.value = cfg.model;
@@ -842,13 +857,9 @@ async function openSettings() {
       option.selected = true;
       select.prepend(option);
     }
-    el("model-hint").textContent =
-      `Applies to all four agents · num_ctx ${cfg.num_ctx} · max_tokens ${cfg.max_tokens}`;
-
-    setTemperature(cfg.temperature);
-    el("profile-editor").value = profile.content;
-    el("profile-path").textContent = profile.path.split(/[\\/]/).pop();
   } catch (error) {
+    select.disabled = false;
+    loading.textContent = "Could not load models";
     toast(`Could not load settings: ${error.message}`);
   }
 }

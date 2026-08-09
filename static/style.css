@@ -69,6 +69,11 @@ body.light {
 
 * { box-sizing: border-box; }
 
+/* Author styles beat the UA's [hidden] rule regardless of specificity, so any
+   component given an explicit display would ignore the hidden attribute. That
+   silently broke the back button, "View results" and "Copy for LinkedIn". */
+[hidden] { display: none !important; }
+
 html, body { margin: 0; padding: 0; }
 
 body {
