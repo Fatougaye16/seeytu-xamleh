@@ -8,12 +8,15 @@ only — PDF, docx and epub need parsers that would take the runtime dependency
 list from three to six, tracked separately.
 """
 
+import ipaddress
 import json
 import re
+import socket
 import unicodedata
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -127,17 +130,77 @@ class _TextExtractor(HTMLParser):
         return re.sub(r"\n{3,}", "\n\n", joined).strip()
 
 
+MAX_REDIRECTS = 4
+
+
+def _assert_public_host(url: str) -> None:
+    """Refuse URLs that resolve to anything but a public address.
+
+    A pasted link is untrusted input. Without this the server would happily
+    fetch http://169.254.169.254/ (cloud metadata), http://localhost:11434
+    (the Ollama daemon) or an intranet host, store the response as a resource,
+    and hand it to the Scout — which in cloud mode forwards it to Ollama's
+    servers. That is an exfiltration path that needs no malicious user, only a
+    link they were given.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Only http and https links can be fetched.")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("That URL has no host.")
+    if config.ALLOW_PRIVATE_FETCH:
+        return
+
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f"Could not resolve {host}.") from exc
+
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        blocked = (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+            or not address.is_global
+        )
+        if blocked:
+            raise ValueError(
+                f"{host} resolves to {address}, which is not a public address. "
+                "Set ALLOW_PRIVATE_FETCH=1 if you really mean to index a local host."
+            )
+
+
 def _fetch_url(url: str) -> tuple[str, str]:
     """Return (title, markdown-ish text) for a page. Fetched once, then stored."""
-    if not url.lower().startswith(("http://", "https://")):
-        raise ValueError("Only http and https links can be fetched.")
+    # Redirects are followed by hand so every hop is validated. Left to
+    # requests, a public URL could redirect straight to a private one.
+    current = url
+    response = None
     try:
-        response = requests.get(
-            url,
-            timeout=(config.CONNECT_TIMEOUT, 30),
-            headers={"User-Agent": f"{config.APP_NAME}/1.0"},
-        )
-        response.raise_for_status()
+        for _ in range(MAX_REDIRECTS + 1):
+            _assert_public_host(current)
+            response = requests.get(
+                current,
+                timeout=(config.CONNECT_TIMEOUT, 30),
+                headers={"User-Agent": f"{config.APP_NAME}/1.0"},
+                allow_redirects=False,
+            )
+            if response.is_redirect or response.is_permanent_redirect:
+                location = response.headers.get("Location")
+                if not location:
+                    raise ValueError("Redirect without a destination.")
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            break
+        else:
+            raise ValueError(f"Too many redirects (more than {MAX_REDIRECTS}).")
     except requests.RequestException as exc:
         raise ValueError(f"Could not fetch {url}: {exc}") from exc
 

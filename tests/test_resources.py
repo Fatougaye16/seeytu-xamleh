@@ -120,6 +120,138 @@ def test_enabled_context_respects_its_character_budget():
     assert len(context) <= 2000
 
 
+def _public_dns(monkeypatch, address="93.184.216.34"):
+    """Pretend every hostname resolves to a public address."""
+    monkeypatch.setattr(
+        resources.socket, "getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", (address, 443))],
+    )
+
+
+def _resolving_to(monkeypatch, mapping):
+    """Resolve specific hostnames to specific addresses."""
+    def fake(host, *args, **kwargs):
+        return [(2, 1, 6, "", (mapping[host], 443))]
+    monkeypatch.setattr(resources.socket, "getaddrinfo", fake)
+
+
+@pytest.mark.parametrize(
+    "address,label",
+    [
+        ("127.0.0.1", "loopback"),
+        ("169.254.169.254", "cloud metadata / link-local"),
+        ("10.0.0.5", "RFC1918"),
+        ("192.168.1.10", "RFC1918"),
+        ("172.16.4.4", "RFC1918"),
+        ("0.0.0.0", "unspecified"),
+        ("224.0.0.1", "multicast"),
+        ("::1", "IPv6 loopback"),
+        ("fd00::1", "IPv6 unique-local"),
+    ],
+)
+def test_fetch_refuses_non_public_addresses(monkeypatch, address, label):
+    """SSRF guard: a pasted link must not reach the metadata service or intranet."""
+    _public_dns(monkeypatch, address)
+    monkeypatch.setattr(config, "ALLOW_PRIVATE_FETCH", False)
+    with pytest.raises(ValueError) as excinfo:
+        resources.add("url", "https://looks-harmless.example/page")
+    assert "not a public address" in str(excinfo.value), label
+
+
+def test_fetch_allows_private_addresses_only_when_explicitly_enabled(monkeypatch):
+    _public_dns(monkeypatch, "127.0.0.1")
+    monkeypatch.setattr(config, "ALLOW_PRIVATE_FETCH", True)
+
+    class FakeResponse:
+        content = b"<html><title>Local</title><body><p>intranet doc</p></body></html>"
+        text = content.decode()
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: FakeResponse())
+    entry = resources.add("url", "http://localhost:8080/doc")
+    assert entry["name"] == "Local"
+
+
+def test_a_redirect_to_a_private_address_is_refused(monkeypatch):
+    """The teeth of the issue: the first hop is public, the second is not."""
+    _resolving_to(monkeypatch, {
+        "public.example": "93.184.216.34",
+        "metadata.evil": "169.254.169.254",
+    })
+    monkeypatch.setattr(config, "ALLOW_PRIVATE_FETCH", False)
+
+    class Redirect:
+        content = b""
+        text = ""
+        is_redirect = True
+        is_permanent_redirect = False
+        headers = {"Location": "http://metadata.evil/latest/meta-data/"}
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: Redirect())
+    with pytest.raises(ValueError) as excinfo:
+        resources.add("url", "https://public.example/start")
+    assert "not a public address" in str(excinfo.value)
+
+
+def test_redirects_are_not_followed_by_requests_itself(monkeypatch):
+    """allow_redirects must be False, or requests would bypass the per-hop check."""
+    _public_dns(monkeypatch)
+    seen = {}
+
+    class FakeResponse:
+        content = b"<html><title>T</title><body><p>body text</p></body></html>"
+        text = content.decode()
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, **kwargs):
+        seen.update(kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr(resources.requests, "get", fake_get)
+    resources.add("url", "https://example.dev/page")
+    assert seen["allow_redirects"] is False
+
+
+def test_a_redirect_loop_is_capped(monkeypatch):
+    _public_dns(monkeypatch)
+
+    class Redirect:
+        content = b""
+        text = ""
+        is_redirect = True
+        is_permanent_redirect = False
+        headers = {"Location": "https://example.dev/again"}
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: Redirect())
+    with pytest.raises(ValueError) as excinfo:
+        resources.add("url", "https://example.dev/start")
+    assert "Too many redirects" in str(excinfo.value)
+
+
+def test_unresolvable_host_is_reported_clearly(monkeypatch):
+    def boom(*args, **kwargs):
+        raise resources.socket.gaierror("nodename nor servname provided")
+
+    monkeypatch.setattr(resources.socket, "getaddrinfo", boom)
+    with pytest.raises(ValueError) as excinfo:
+        resources.add("url", "https://does-not-exist.invalid/x")
+    assert "Could not resolve" in str(excinfo.value)
+
+
 def test_url_extraction_turns_html_into_readable_text(monkeypatch):
     html = """
     <html><head><title>Hybrid search</title><style>.a{color:red}</style></head>
@@ -132,10 +264,13 @@ def test_url_extraction_turns_html_into_readable_text(monkeypatch):
     class FakeResponse:
         content = html.encode("utf-8")
         text = html
+        is_redirect = False
+        is_permanent_redirect = False
 
         def raise_for_status(self):
             pass
 
+    _public_dns(monkeypatch)
     monkeypatch.setattr(resources.requests, "get", lambda *a, **k: FakeResponse())
     entry = resources.add("url", "https://example.dev/hybrid")
 
