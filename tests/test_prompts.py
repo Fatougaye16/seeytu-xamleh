@@ -53,6 +53,25 @@ def test_publisher_prompt_states_the_word_count_targets():
     assert "800" in text and "1500" in text
 
 
+def test_publisher_requires_a_verify_block_in_each_of_the_three_pieces():
+    """One block at the end lands only in the NOTION section once split."""
+    text = prompts.system_prompt("publisher")
+    assert "each of the three" in text.lower()
+    assert text.lower().count("verify before publishing") >= 2
+
+
+def test_publisher_forbids_fabricated_first_person_experience():
+    text = prompts.system_prompt("publisher").lower()
+    assert "first-person" in text or "first person" in text
+    assert "never invent" in text or "do not invent" in text
+
+
+def test_publisher_demands_multiple_linkedin_paragraphs():
+    text = prompts.system_prompt("publisher").lower()
+    assert "blank line" in text
+    assert "at least three paragraphs" in text
+
+
 def test_architect_prompt_requires_a_connecting_the_dots_phase():
     assert "connecting the dots" in prompts.system_prompt("architect").lower()
 

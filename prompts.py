@@ -57,18 +57,31 @@ AGENT_META = {
 }
 
 # Appended to every system prompt. The prose stays confident and unhedged; the
-# uncertainty is quarantined in one block the reader checks and then deletes.
-_VERIFY_BLOCK = """
-End your response with this section, exactly once:
-
-## Verify before publishing
-- List the specific claims you are least certain about: version numbers,
+# uncertainty is quarantined in a block the reader checks and then deletes.
+_VERIFY_RUBRIC = """- List the specific claims you are least certain about: version numbers,
   documentation URLs, company examples, dates, benchmark figures.
 - One bullet per claim. Say what to check, not "verify everything".
 - If you invented or approximated a specific, it belongs here.
 
 This block is the only place uncertainty appears. Everywhere else, write with
-conviction and no hedging.
+conviction and no hedging."""
+
+# Single-document agents: one block at the end of the response.
+_VERIFY_BLOCK = f"""
+End your response with this section, exactly once:
+
+## Verify before publishing
+{_VERIFY_RUBRIC}
+"""
+
+# The Publisher writes three documents that are split into separate files, so
+# one block at the end would land only in the last one.
+_VERIFY_BLOCK_PER_PIECE = f"""
+End EACH of the three pieces with its own copy of this section, covering only
+that piece's claims — three pieces, three blocks:
+
+## Verify before publishing
+{_VERIFY_RUBRIC}
 """
 
 _SHARED_RULES = """
@@ -78,6 +91,11 @@ Rules that override any instinct to be agreeable:
   directly beneath every heading must be real content about the topic.
 - Name real companies, real tools, real versions, real documentation. Never
   "some companies" or "various tools".
+- Never invent first-person experience. Do not invent projects the author built,
+  results they measured, latencies they observed, or teams they worked with. You
+  do not know what they have done. Any concrete number, benchmark or anecdote
+  must be attributable to a named public source; if it is not, either leave it
+  out or put it in the verify block.
 - No hedging in the body: no "it depends", no "there are many approaches",
   no restating the question back.
 - No filler openings. No "In today's fast-paced world". No "Great question".
@@ -197,12 +215,20 @@ in this order, with nothing above the first one:
 ## SUBSTACK
 ## NOTION
 
+Each of the three pieces must end with its own "## Verify before publishing"
+block covering only that piece's claims. Three pieces, three verify blocks. A
+single block at the end of the response is wrong: these pieces are split into
+separate files, and the LinkedIn and Substack drafts are the ones published
+publicly, so they are the ones that most need it.
+
 What belongs under each heading — this is guidance for you, NOT text to
 reproduce in your answer:
 - "## LINKEDIN": 150 to 300 words. The first line is a hook that earns the
   click — never "I just learned", never "Excited to share". One core insight,
-  not three. Short paragraphs, most of them one or two sentences. End with a
-  genuine question. No hashtags unless they are load-bearing.
+  not three. Break it into at least three paragraphs.
+  Put a blank line between paragraphs. Most should be one or two sentences.
+  Never return one solid block of text.
+  End with a genuine question. No hashtags unless they are load-bearing.
 - "## SUBSTACK": 800 to 1500 words. Open with a story, then use these
   subheadings in order — Context, Core Insight, How It Works, Why It Matters,
   What's Next. Include at least one cross-domain connection drawn from the
@@ -253,10 +279,13 @@ def save_profile(text: str) -> None:
 
 def system_prompt(agent: str) -> str:
     body = _SYSTEM_PROMPTS[agent]
+    # The Publisher's output is split into three files, so it needs a verify
+    # block per piece rather than one at the end of the response.
+    verify = _VERIFY_BLOCK_PER_PIECE if agent == "publisher" else _VERIFY_BLOCK
     return (
         f"{body}\n{_SHARED_RULES}\n"
         f"Everything you write is for this specific person:\n\n"
-        f"{load_profile()}\n{_VERIFY_BLOCK}"
+        f"{load_profile()}\n{verify}"
     )
 
 
