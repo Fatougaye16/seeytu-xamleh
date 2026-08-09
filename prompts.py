@@ -297,10 +297,26 @@ def system_prompt(agent: str) -> str:
     )
 
 
-def user_prompt(agent: str, topic: str, prior: dict[str, str]) -> str:
+def user_prompt(
+    agent: str,
+    topic: str,
+    prior: dict[str, str],
+    sources: str = "",
+) -> str:
     if agent not in _CONTEXT_KEYS:
         raise KeyError(agent)
     parts = [f"TOPIC: {topic}"]
+
+    # The Scout is the only agent given the user's own library: it is the one
+    # doing the research, and later agents inherit that work through its brief.
+    if agent == "scout" and sources:
+        parts.append(
+            "--- THE USER'S OWN SOURCES ---\n"
+            "Read these first and prefer them over recall. Cite them by name "
+            "when they support a point, and say plainly when they contradict "
+            "what you would otherwise have written.\n\n" + sources
+        )
+
     for key in _CONTEXT_KEYS[agent]:
         content = prior.get(key)
         if content:

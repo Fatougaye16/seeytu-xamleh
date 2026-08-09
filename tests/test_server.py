@@ -352,6 +352,75 @@ def test_websocket_on_unknown_run_reports_an_error(client):
     assert event["type"] == "error"
 
 
+def test_resources_lifecycle_over_http(client):
+    assert client.get("/api/resources").json() == {
+        "resources": [], "hint": "Markdown and text files. 5 MB per file."
+    }
+
+    created = client.post(
+        "/api/resources",
+        json={"kind": "note", "name": "Sync notes", "content": "ship the retriever"},
+    ).json()
+    assert created["enabled"] is True
+
+    listing = client.get("/api/resources").json()["resources"]
+    assert [entry["name"] for entry in listing] == ["Sync notes"]
+
+    toggled = client.post(f"/api/resources/{created['id']}/toggle").json()
+    assert toggled["enabled"] is False
+
+    assert client.delete(f"/api/resources/{created['id']}").status_code == 200
+    assert client.get("/api/resources").json()["resources"] == []
+
+
+def test_unsupported_file_type_returns_415(client):
+    response = client.post(
+        "/api/resources", json={"kind": "file", "name": "paper.pdf", "content": "x"}
+    )
+    assert response.status_code == 415
+    assert "parser" in response.json()["detail"]
+
+
+def test_blank_resource_name_is_rejected(client):
+    assert client.post(
+        "/api/resources", json={"kind": "note", "name": "  ", "content": "x"}
+    ).status_code == 422
+
+
+def test_resource_traversal_is_rejected(client):
+    assert client.post("/api/resources/..%2F..%2Fetc/toggle").status_code in (400, 404)
+    assert client.delete("/api/resources/..%2F..%2Fetc").status_code in (400, 404)
+
+
+def test_enabled_resources_reach_the_scout_but_not_later_agents(client, monkeypatch):
+    client.post(
+        "/api/resources",
+        json={"kind": "note", "name": "My notes", "content": "SOURCE-MARKER inside"},
+    )
+
+    seen = {}
+
+    def fake_call_model(
+        system, user, *, model, temperature,
+        on_token=None, on_thinking=None, should_cancel=None,
+    ):
+        if "research analyst" in system[:120]:
+            seen["scout"] = user
+        if "curriculum designer" in system[:120]:
+            seen["architect"] = user
+        if "## LINKEDIN" in system:
+            return "## LINKEDIN\np\n\n## SUBSTACK\ns\n\n## NOTION\nn"
+        return "body"
+
+    monkeypatch.setattr(agents, "call_model", fake_call_model)
+    run_id = client.post("/api/run", json={"topic": "sources"}).json()["run_id"]
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+
+    assert "SOURCE-MARKER" in seen["scout"]
+    assert "SOURCE-MARKER" not in seen["architect"]
+
+
 def test_index_is_served(client):
     response = client.get("/")
     assert response.status_code == 200

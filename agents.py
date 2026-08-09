@@ -13,6 +13,7 @@ import requests
 
 import config
 import prompts
+import resources
 import runstore
 from textutil import split_writer_output
 
@@ -273,11 +274,12 @@ def run_agent(
     on_token: Callable[[str], None] | None = None,
     on_thinking: Callable[[str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    sources: str = "",
 ) -> str:
     """Run one agent. All prior outputs are passed as context in the user message."""
     return call_model(
         prompts.system_prompt(agent),
-        prompts.user_prompt(agent, topic, prior),
+        prompts.user_prompt(agent, topic, prior, sources),
         model=model,
         temperature=temperature,
         on_token=on_token,
@@ -310,6 +312,9 @@ def run_pipeline(
     temp = config.TEMPERATURE if temperature is None else temperature
     outputs: dict[str, str] = dict(prior or {})
     total = len(prompts.AGENTS)
+    # Read once per run, so toggling a source mid-run cannot change the inputs
+    # halfway through.
+    sources = resources.enabled_context()
 
     for step, agent in enumerate(prompts.AGENTS, start=1):
         output_key = prompts.AGENT_META[agent]["output_key"]
@@ -333,6 +338,7 @@ def run_pipeline(
                     {"type": "agent_thinking", "agent": a, "step": s, "delta": delta}
                 ),
                 should_cancel=should_cancel,
+                sources=sources,
             )
         except RunCancelled:
             on_event({

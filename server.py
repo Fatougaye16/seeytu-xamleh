@@ -13,6 +13,7 @@ from pydantic import BaseModel, field_validator
 import agents
 import config
 import prompts
+import resources
 import runstore
 from textutil import drop_verify_block, strip_markdown
 
@@ -46,6 +47,20 @@ class SingleAgentRequest(RunRequest):
 
 class ProfileRequest(BaseModel):
     content: str
+
+
+class ResourceRequest(BaseModel):
+    kind: str
+    name: str
+    content: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name must not be empty")
+        return cleaned
 
 
 class ConfigRequest(BaseModel):
@@ -339,6 +354,41 @@ def delete_run(run_id: str) -> dict:
     except runstore.UnsafePath as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"deleted": run_id}
+
+
+@app.get("/api/resources")
+def list_resources() -> dict:
+    return {"resources": resources.listing(), "hint": resources.DROPZONE_HINT}
+
+
+@app.post("/api/resources")
+def add_resource(request: ResourceRequest) -> dict:
+    try:
+        return resources.add(request.kind, request.name, request.content)
+    except resources.UnsupportedResource as exc:
+        # 415: the request was well-formed, the format simply is not supported.
+        raise HTTPException(status_code=415, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.post("/api/resources/{resource_id}/toggle")
+def toggle_resource(resource_id: str) -> dict:
+    try:
+        return resources.toggle(resource_id)
+    except resources.UnsafeResource as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No such resource: {resource_id}")
+
+
+@app.delete("/api/resources/{resource_id}")
+def delete_resource(resource_id: str) -> dict:
+    try:
+        resources.remove(resource_id)
+    except resources.UnsafeResource as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"deleted": resource_id}
 
 
 @app.get("/api/profile")
