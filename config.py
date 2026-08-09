@@ -45,6 +45,8 @@ KEEP_ALIVE = os.getenv("KEEP_ALIVE", "15m")
 
 # --- Storage and server --------------------------------------------------
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output")).resolve()
+# Local sources the Scout reads before relying on model recall.
+RESOURCES_DIR = Path(os.getenv("RESOURCES_DIR", "resources_data")).resolve()
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "127.0.0.1")
 MAX_CONCURRENT_RUNS = int(os.getenv("MAX_CONCURRENT_RUNS", "2"))
