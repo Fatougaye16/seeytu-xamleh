@@ -7,10 +7,14 @@ everything else alone.
 
 import json
 from collections.abc import Callable
+from datetime import datetime
 
 import requests
 
 import config
+import prompts
+import runstore
+from textutil import split_writer_output
 
 # Cloud model families, for mode detection and for the settings dropdown.
 # /api/tags lists LOCAL models only, so cloud names cannot be discovered and
@@ -226,3 +230,117 @@ def preflight() -> dict:
         status["error"] = str(exc)
         status["hint"] = exc.hint
     return status
+
+
+# --- The pipeline --------------------------------------------------------
+
+
+def run_agent(
+    agent: str,
+    topic: str,
+    prior: dict[str, str],
+    *,
+    model: str,
+    temperature: float,
+    on_token: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
+    """Run one agent. All prior outputs are passed as context in the user message."""
+    return call_model(
+        prompts.system_prompt(agent),
+        prompts.user_prompt(agent, topic, prior),
+        model=model,
+        temperature=temperature,
+        on_token=on_token,
+        should_cancel=should_cancel,
+    )
+
+
+def run_pipeline(
+    topic: str,
+    *,
+    on_event: Callable[[dict], None],
+    run_id: str,
+    prior: dict[str, str] | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict:
+    """Run the four agents in sequence and write the run atomically.
+
+    Nothing touches disk until all four agents have succeeded, so `output/`
+    never contains a partial run. Completed output is reported on the error
+    event, which is what lets the caller retry from the failed agent instead of
+    regenerating from scratch — pass it back in as `prior`.
+
+    Events are pushed through `on_event`; this function knows nothing about
+    WebSockets or terminals, so the CLI and the server share it unchanged.
+    """
+    resolved_model, mode = resolve_model(model)
+    temp = config.TEMPERATURE if temperature is None else temperature
+    outputs: dict[str, str] = dict(prior or {})
+    total = len(prompts.AGENTS)
+
+    for step, agent in enumerate(prompts.AGENTS, start=1):
+        output_key = prompts.AGENT_META[agent]["output_key"]
+        if output_key in outputs:
+            continue  # resuming: this agent already succeeded on a prior attempt
+
+        on_event({"type": "agent_start", "agent": agent, "step": step, "total": total})
+        try:
+            text = run_agent(
+                agent,
+                topic,
+                outputs,
+                model=resolved_model,
+                temperature=temp,
+                on_token=lambda delta, a=agent, s=step: on_event(
+                    {"type": "agent_token", "agent": a, "step": s, "delta": delta}
+                ),
+                should_cancel=should_cancel,
+            )
+        except RunCancelled:
+            on_event({
+                "type": "cancelled", "agent": agent, "step": step,
+                "completed": sorted(outputs),
+            })
+            raise
+        except OllamaError as exc:
+            on_event({
+                "type": "error", "message": str(exc), "hint": exc.hint,
+                "agent": agent, "step": step, "completed": sorted(outputs),
+            })
+            raise
+
+        outputs[output_key] = text
+        on_event({
+            "type": "agent_complete", "agent": agent, "step": step, "output": text,
+        })
+
+    # The Publisher returns all three pieces in one response; split them, and
+    # always keep the raw response so a parsing failure loses nothing.
+    sections, missing = split_writer_output(outputs["combined"])
+    outputs.update(sections)
+
+    files = runstore.write_run(
+        run_id,
+        topic,
+        outputs,
+        {
+            "model": resolved_model,
+            "mode": mode,
+            "temperature": temp,
+            "missing_sections": missing,
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    folder = str(runstore.safe_run_dir(run_id))
+    result = {
+        "type": "pipeline_complete",
+        "run_id": run_id,
+        "folder": folder,
+        "files": files,
+        "missing_sections": missing,
+    }
+    on_event(result)
+    return result
