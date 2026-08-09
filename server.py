@@ -1,9 +1,11 @@
 """FastAPI backend: REST endpoints, the run registry, and the progress WebSocket."""
 
 import asyncio
+import io
+import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
@@ -259,6 +261,34 @@ def get_run(run_id: str) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"No such run: {run_id}")
+
+
+@app.get("/api/runs/{run_id}/archive")
+def get_run_archive(run_id: str) -> Response:
+    """Every markdown file plus run.json, zipped in memory.
+
+    Declared BEFORE the {filename} route: otherwise "archive" is captured as a
+    filename and rejected by the whitelist. Containment reuses safe_run_dir, so
+    no new path logic is introduced.
+    """
+    try:
+        directory = runstore.safe_run_dir(run_id)
+    except runstore.UnsafePath as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail=f"No such run: {run_id}")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(directory.iterdir()):
+            if path.is_file() and path.suffix in {".md", ".json"}:
+                archive.write(path, arcname=path.name)
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{run_id}.zip"'},
+    )
 
 
 @app.get("/api/runs/{run_id}/{filename}", response_class=PlainTextResponse)

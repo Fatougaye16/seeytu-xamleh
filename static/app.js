@@ -317,6 +317,13 @@ async function copyActive() {
   toast("Copied!");
 }
 
+function downloadAll() {
+  if (!state.run) return;
+  // A plain navigation: the browser handles the zip stream and the
+  // Content-Disposition filename without any blob juggling.
+  window.location.href = `/api/runs/${state.run.run_id}/archive`;
+}
+
 function downloadActive() {
   const file = activeFile();
   if (!file) return;
@@ -501,6 +508,7 @@ el("topic-input").onkeydown = (keyEvent) => {
 el("cancel-button").onclick = cancelRun;
 el("copy-button").onclick = copyActive;
 el("download-button").onclick = downloadActive;
+el("download-all-button").onclick = downloadAll;
 el("theme-toggle").onclick = toggleTheme;
 el("theme-toggle-panel").onclick = toggleTheme;
 
