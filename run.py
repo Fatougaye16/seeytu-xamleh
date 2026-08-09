@@ -31,6 +31,10 @@ def cli_event_printer():
                 f"\n{meta['emoji']}  Agent {event['step']}/{event['total']}: "
                 f"{meta['name']} — {meta['activity']}..."
             )
+        elif kind == "agent_thinking":
+            # Reasoning phase: a distinct pulse, so a long think is not mistaken
+            # for a hang.
+            print("·", end="", flush=True)
         elif kind == "agent_token":
             # A visible pulse without flooding the terminal with the full text.
             print(".", end="", flush=True)

@@ -34,6 +34,11 @@ def _token(text, done=False):
     return {"message": {"content": text}, "done": done}
 
 
+def _thought(text, done=False):
+    """A reasoning model's chain-of-thought chunk: content empty, thinking set."""
+    return {"message": {"content": "", "thinking": text}, "done": done}
+
+
 def test_call_model_concatenates_streamed_tokens(monkeypatch):
     captured = {}
 
@@ -179,6 +184,68 @@ def test_call_model_stops_promptly_when_cancelled(monkeypatch):
     assert len(emitted) == 2
 
 
+def test_call_model_keeps_thinking_out_of_the_answer(monkeypatch):
+    """Reasoning models stream chain-of-thought in message.thinking."""
+
+    def fake_post(*args, **kwargs):
+        return FakeResponse([
+            _thought("The user "),
+            _thought("wants a list."),
+            _token("Real answer."),
+            _token("", done=True),
+        ])
+
+    monkeypatch.setattr(agents.requests, "post", fake_post)
+    content, thoughts = [], []
+    result = agents.call_model(
+        "s", "u", model="gpt-oss:120b-cloud", temperature=0.2,
+        on_token=content.append, on_thinking=thoughts.append,
+    )
+
+    assert result == "Real answer."
+    assert content == ["Real answer."], "thinking must never reach the answer text"
+    assert thoughts == ["The user ", "wants a list."]
+
+
+def test_call_model_works_without_an_on_thinking_callback(monkeypatch):
+    def fake_post(*args, **kwargs):
+        return FakeResponse([_thought("hmm"), _token("answer", done=True)])
+
+    monkeypatch.setattr(agents.requests, "post", fake_post)
+    assert agents.call_model("s", "u", model="m", temperature=0.2) == "answer"
+
+
+def test_call_model_explains_an_answer_starved_by_reasoning(monkeypatch):
+    """All budget spent thinking: the error must name that cause, not say 'try again'."""
+
+    def fake_post(*args, **kwargs):
+        return FakeResponse([_thought("thinking..."), _thought("still", done=True)])
+
+    monkeypatch.setattr(agents.requests, "post", fake_post)
+    with pytest.raises(agents.OllamaError) as excinfo:
+        agents.call_model("s", "u", model="gpt-oss:120b-cloud", temperature=0.2)
+
+    assert "reasoning" in str(excinfo.value).lower()
+    assert "MAX_TOKENS" in excinfo.value.hint
+
+
+def test_call_model_empty_response_without_thinking_is_reported_plainly(monkeypatch):
+    def fake_post(*args, **kwargs):
+        return FakeResponse([_token("", done=True)])
+
+    monkeypatch.setattr(agents.requests, "post", fake_post)
+    with pytest.raises(agents.OllamaError) as excinfo:
+        agents.call_model("s", "u", model="llama3.2:latest", temperature=0.2)
+    assert "empty response" in str(excinfo.value).lower()
+
+
+def test_max_tokens_default_leaves_room_for_reasoning():
+    assert config.MAX_TOKENS >= 8192, (
+        "reasoning models spend part of num_predict thinking; too small a "
+        "budget starves the answer entirely"
+    )
+
+
 def test_is_cloud_model_recognizes_both_forms():
     assert agents.is_cloud_model("gpt-oss:120b-cloud")
     assert agents.is_cloud_model("deepseek-v4-flash")
@@ -217,7 +284,10 @@ def _stub_outputs(monkeypatch, failing_agent=None):
     """Replace call_model with a deterministic stub. Returns the call log."""
     calls = []
 
-    def fake_call_model(system, user, *, model, temperature, on_token=None, should_cancel=None):
+    def fake_call_model(
+        system, user, *, model, temperature,
+        on_token=None, on_thinking=None, should_cancel=None,
+    ):
         calls.append({"system": system, "user": user, "model": model})
         if failing_agent and failing_agent in system[:400]:
             raise agents.OllamaError("boom", "do the thing")
@@ -327,7 +397,10 @@ def test_run_pipeline_resumes_from_prior_outputs(monkeypatch, tmp_path):
 def test_run_pipeline_reports_missing_writer_sections(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "output")
 
-    def fake_call_model(system, user, *, model, temperature, on_token=None, should_cancel=None):
+    def fake_call_model(
+        system, user, *, model, temperature,
+        on_token=None, on_thinking=None, should_cancel=None,
+    ):
         if "## LINKEDIN" in system:
             return "## LINKEDIN\nonly the post survived"
         return "fine"
