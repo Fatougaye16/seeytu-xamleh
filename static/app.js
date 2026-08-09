@@ -161,9 +161,35 @@ async function startRun(topicOverride) {
       body: JSON.stringify({ topic }),
     });
     state.runId = run_id;
+    // Remembered so a page reload can re-attach. The server replays the event
+    // buffer, but only if the browser still knows which run to ask for.
+    sessionStorage.setItem("seeytu-run", run_id);
     connectSocket(run_id);
   } catch (error) {
     el("progress-status").textContent = `Could not start: ${error.message}`;
+  }
+}
+
+async function reattachToRunInProgress() {
+  const runId = sessionStorage.getItem("seeytu-run");
+  if (!runId) return;
+
+  try {
+    const runState = await api(`/api/run/${runId}/state`);
+    if (runState.status === "complete") {
+      sessionStorage.removeItem("seeytu-run");
+      return;
+    }
+    if (["queued", "running", "cancelling"].includes(runState.status)) {
+      state.runId = runId;
+      buildStepTracker();
+      el("progress-status").textContent = "Re-attaching to a run already in progress…";
+      showView("progress");
+      connectSocket(runId);
+    }
+  } catch {
+    // The server restarted and forgot the run; nothing to re-attach to.
+    sessionStorage.removeItem("seeytu-run");
   }
 }
 
@@ -226,6 +252,7 @@ function handleEvent(event) {
     case "pipeline_complete":
       el("cancel-button").hidden = true;
       el("progress-status").textContent = "Complete.";
+      sessionStorage.removeItem("seeytu-run");
       loadRun(event.run_id);
       loadHistory();
       break;
@@ -275,7 +302,16 @@ async function retryRun() {
 /* --- Results ----------------------------------------------------------- */
 
 async function loadRun(runId) {
-  state.run = await api(`/api/runs/${runId}`);
+  try {
+    state.run = await api(`/api/runs/${runId}`);
+  } catch (error) {
+    showView("results");
+    el("results-topic").textContent = "Could not open that run";
+    el("results-meta").textContent = error.message;
+    el("result-tabs").innerHTML = "";
+    el("result-panel").textContent = "";
+    return;
+  }
   state.activeTab = state.run.files[0]?.key || null;
   el("results-topic").textContent = state.run.topic;
 
@@ -376,8 +412,18 @@ function downloadActive() {
 /* --- History ----------------------------------------------------------- */
 
 async function loadHistory() {
-  const runs = await api("/api/runs");
   const list = el("history-list");
+  let runs;
+  try {
+    runs = await api("/api/runs");
+  } catch (error) {
+    list.innerHTML = "";
+    const failed = document.createElement("li");
+    failed.className = "empty-state";
+    failed.textContent = `Could not load history: ${error.message}`;
+    list.append(failed);
+    return;
+  }
   list.innerHTML = "";
 
   if (!runs.length) {
@@ -450,8 +496,10 @@ function markHistoryActive(runId) {
 /* --- Settings ---------------------------------------------------------- */
 
 async function openSettings() {
+  state.focusBeforeSettings = document.activeElement;
   el("settings-backdrop").hidden = false;
   el("settings-panel").hidden = false;
+  el("settings-close").focus();
 
   try {
     const [models, cfg, profile] = await Promise.all([
@@ -507,6 +555,8 @@ async function openSettings() {
 function closeSettings() {
   el("settings-backdrop").hidden = true;
   el("settings-panel").hidden = true;
+  // Return focus where it was, so keyboard users are not dumped at the top.
+  state.focusBeforeSettings?.focus?.();
 }
 
 async function saveModel() {
@@ -597,3 +647,4 @@ buildExamples();
 buildStepTracker();
 checkHealth();
 loadHistory();
+reattachToRunInProgress();
