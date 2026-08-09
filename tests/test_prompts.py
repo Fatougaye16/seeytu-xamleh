@@ -110,6 +110,30 @@ def test_profile_round_trips(tmp_path, monkeypatch):
     assert "🚀" in prompts.load_profile()
 
 
+def test_profile_round_trip_is_byte_identical(tmp_path, monkeypatch):
+    """Reading then writing an unedited profile must not modify the file.
+
+    load_profile() used to strip, so opening settings and pressing Save with no
+    edit rewrote the file without its trailing newline and dirtied git.
+    """
+    path = tmp_path / "profile.md"
+    monkeypatch.setattr(prompts, "PROFILE_PATH", path)
+    original = "## Who I am\n\nSome text here.\n"
+    path.write_text(original, encoding="utf-8")
+
+    prompts.save_profile(prompts.load_profile())
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_saved_profile_always_ends_with_one_newline(tmp_path, monkeypatch):
+    path = tmp_path / "profile.md"
+    monkeypatch.setattr(prompts, "PROFILE_PATH", path)
+    prompts.save_profile("no trailing newline")
+    assert path.read_text(encoding="utf-8") == "no trailing newline\n"
+    prompts.save_profile("too many\n\n\n")
+    assert path.read_text(encoding="utf-8") == "too many\n"
+
+
 def test_load_profile_falls_back_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(prompts, "PROFILE_PATH", tmp_path / "absent.md")
     assert prompts.load_profile().strip() != ""

@@ -264,17 +264,25 @@ _CONTEXT_LABELS = {
 
 
 def load_profile() -> str:
-    """The profile body, or a minimal fallback if the file is missing."""
+    """The profile body, or a minimal fallback if the file is missing.
+
+    Returned unmodified: stripping here would mean the settings editor writes
+    back a different file than it read, dirtying git on a no-op save.
+    """
     try:
         text = PROFILE_PATH.read_text(encoding="utf-8")
     except OSError:
         return _PROFILE_FALLBACK
-    return text.strip() or _PROFILE_FALLBACK
+    return text if text.strip() else _PROFILE_FALLBACK
 
 
 def save_profile(text: str) -> None:
-    """Persist the profile. A plain file write — never a rewrite of this module."""
-    PROFILE_PATH.write_text(text, encoding="utf-8")
+    """Persist the profile. A plain file write — never a rewrite of this module.
+
+    Normalized to exactly one trailing newline so hand-edits and UI saves
+    converge on the same bytes instead of fighting over the last line.
+    """
+    PROFILE_PATH.write_text(text.rstrip("\n") + "\n", encoding="utf-8")
 
 
 def system_prompt(agent: str) -> str:
