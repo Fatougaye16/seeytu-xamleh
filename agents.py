@@ -92,6 +92,7 @@ def call_model(
     model: str,
     temperature: float,
     on_token: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     """Send one chat request to Ollama and return the full response text.
@@ -100,6 +101,12 @@ def call_model(
     which gives exactly the semantics wanted: the call aborts after
     AGENT_IDLE_TIMEOUT seconds *of silence*, not after a fixed wall-clock budget
     — a correct local generation can legitimately run for 20 minutes.
+
+    Reasoning models stream chain of thought in `message.thinking` before the
+    answer starts in `message.content`. Only content is returned and passed to
+    `on_token`, so generated files never contain reasoning; thinking is offered
+    separately through `on_thinking` so a caller can show progress during what
+    would otherwise be dead air.
 
     Cloud and local models both go through the local daemon, so only the model
     name distinguishes them.
@@ -142,6 +149,7 @@ def call_model(
         ) from exc
 
     pieces: list[str] = []
+    thought_tokens = 0
     try:
         for line in response.iter_lines():
             if not line:
@@ -154,7 +162,16 @@ def call_model(
             if chunk.get("error"):
                 raise _classify(str(chunk["error"]), model)
 
-            piece = chunk.get("message", {}).get("content", "")
+            message = chunk.get("message", {})
+
+            # Chain of thought: progress signal only. Never part of the answer.
+            thought = message.get("thinking") or ""
+            if thought:
+                thought_tokens += 1
+                if on_thinking:
+                    on_thinking(thought)
+
+            piece = message.get("content", "")
             if piece:
                 pieces.append(piece)
                 if on_token:
@@ -174,7 +191,18 @@ def call_model(
 
     text = "".join(pieces).strip()
     if not text:
-        raise OllamaError(f"Model '{model}' returned an empty response.", "Try again.")
+        if thought_tokens:
+            # The model reasoned until it hit num_predict and never began the
+            # answer. Retrying changes nothing; the budget has to grow.
+            raise OllamaError(
+                f"Model '{model}' spent its entire {config.MAX_TOKENS}-token budget "
+                f"on reasoning ({thought_tokens} chunks) and never produced an answer.",
+                "Raise MAX_TOKENS, or choose a model that does not reason before answering.",
+            )
+        raise OllamaError(
+            f"Model '{model}' returned an empty response.",
+            "Retry, and check `ollama ps` to confirm the model is loaded.",
+        )
     return text
 
 
@@ -243,6 +271,7 @@ def run_agent(
     model: str,
     temperature: float,
     on_token: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     """Run one agent. All prior outputs are passed as context in the user message."""
@@ -252,6 +281,7 @@ def run_agent(
         model=model,
         temperature=temperature,
         on_token=on_token,
+        on_thinking=on_thinking,
         should_cancel=should_cancel,
     )
 
@@ -296,6 +326,11 @@ def run_pipeline(
                 temperature=temp,
                 on_token=lambda delta, a=agent, s=step: on_event(
                     {"type": "agent_token", "agent": a, "step": s, "delta": delta}
+                ),
+                # Reasoning models think before answering; without this the UI
+                # would show a spinner and nothing else for that whole phase.
+                on_thinking=lambda delta, a=agent, s=step: on_event(
+                    {"type": "agent_thinking", "agent": a, "step": s, "delta": delta}
                 ),
                 should_cancel=should_cancel,
             )

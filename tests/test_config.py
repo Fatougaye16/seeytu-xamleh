@@ -7,7 +7,8 @@ def test_defaults_are_sane():
     assert config.APP_NAME == "Seeytu-Xamleh"
     assert config.APP_SHORT_NAME == "Seeytu"
     assert config.NUM_CTX >= 16384, "num_ctx must be large enough for the Publisher's input"
-    assert config.MAX_TOKENS == 4096
+    # Reasoning models spend part of num_predict thinking before answering.
+    assert config.MAX_TOKENS >= 8192
     assert config.OLLAMA_URL == "http://localhost:11434"
     assert config.MAX_CONCURRENT_RUNS >= 1
 

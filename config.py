@@ -23,7 +23,12 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") or None
 
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 # Maps to Ollama's num_predict: the maximum *output* length.
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
+#
+# Reasoning models (gpt-oss among them) spend part of this budget on chain of
+# thought before the answer begins, so the ceiling must cover thinking *and*
+# answer. At 4096 a long prompt can burn the whole budget reasoning and return
+# nothing at all.
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "8192"))
 # Maps to Ollama's num_ctx: the context window. MUST be set explicitly — the
 # Ollama default is small regardless of what the model supports, and the
 # Publisher's input (topic + three prior outputs) runs 6k-12k tokens. Left at
