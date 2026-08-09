@@ -223,6 +223,125 @@ def test_cancel_marks_the_run_cancelled(client):
     }
 
 
+def test_retry_returns_immediately_rather_than_awaiting_the_pipeline(client, monkeypatch):
+    """A retry that blocks the HTTP request would hang the browser for minutes."""
+    calls = {"count": 0}
+
+    def failing_call_model(
+        system, user, *, model, temperature,
+        on_token=None, on_thinking=None, should_cancel=None,
+    ):
+        calls["count"] += 1
+        # Fail the Builder on the first attempt only.
+        if "capstone project" in system[:400] and calls["count"] < 4:
+            raise agents.OllamaError("builder exploded", "fix it")
+        if "## LINKEDIN" in system:
+            return "## LINKEDIN\np\n\n## SUBSTACK\ns\n\n## NOTION\nn"
+        return "body"
+
+    monkeypatch.setattr(agents, "call_model", failing_call_model)
+
+    run_id = client.post("/api/run", json={"topic": "retry me"}).json()["run_id"]
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        events = _drain(websocket)
+    assert events[-1]["type"] == "error"
+    assert client.get(f"/api/run/{run_id}/state").json()["status"] == "failed"
+    # Scout and Architect succeeded; their output is retained for the retry.
+    assert client.get(f"/api/run/{run_id}/state").json()["completed"] == ["learning", "research"]
+
+    response = client.post(f"/api/run/{run_id}/retry")
+    assert response.status_code == 200
+    assert response.json()["status"] in {"queued", "running", "complete"}
+
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+    assert client.get(f"/api/run/{run_id}/state").json()["status"] == "complete"
+
+
+def test_retry_resumes_rather_than_rerunning_completed_agents(client, monkeypatch):
+    seen = []
+
+    def failing_call_model(
+        system, user, *, model, temperature,
+        on_token=None, on_thinking=None, should_cancel=None,
+    ):
+        if "research analyst" in system[:120]:
+            seen.append("scout")
+        if "capstone project" in system[:400] and len(seen) < 2:
+            seen.append("builder-fail")
+            raise agents.OllamaError("boom", "hint")
+        if "## LINKEDIN" in system:
+            return "## LINKEDIN\np\n\n## SUBSTACK\ns\n\n## NOTION\nn"
+        return "body"
+
+    monkeypatch.setattr(agents, "call_model", failing_call_model)
+    run_id = client.post("/api/run", json={"topic": "resume me"}).json()["run_id"]
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+
+    client.post(f"/api/run/{run_id}/retry")
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+
+    # The Scout ran once, on the first attempt only.
+    assert seen.count("scout") == 1
+
+
+def test_retry_of_a_complete_run_is_rejected(client):
+    run_id = client.post("/api/run", json={"topic": "already done"}).json()["run_id"]
+    with client.websocket_connect(f"/ws/pipeline/{run_id}") as websocket:
+        _drain(websocket)
+    assert client.post(f"/api/run/{run_id}/retry").status_code == 409
+
+
+def test_a_run_beyond_the_cap_reports_queued(tmp_path, monkeypatch):
+    """Driven directly against the registry.
+
+    Going through TestClient here would mean racing its portal loop to observe a
+    transient state; asserting on the registry is both clearer and instant.
+    """
+    import asyncio
+
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(config, "MAX_CONCURRENT_RUNS", 1)
+    monkeypatch.setattr(agents, "resolve_model", lambda preferred=None: ("stub", "local"))
+
+    async def scenario():
+        registry = server.RunRegistry()
+        first = registry.create("first", None, None)
+        second = registry.create("second", None, None)
+
+        release = asyncio.Event()
+
+        async def fake_pipeline(run_id):
+            """Stand in for start()'s body: hold the semaphore until released."""
+            async with registry._semaphore:
+                await release.wait()
+
+        # Occupy the only slot.
+        holder = asyncio.create_task(fake_pipeline(first))
+        await asyncio.sleep(0)  # let it acquire
+
+        def blocking_pipeline(*args, **kwargs):
+            return {"type": "pipeline_complete", "run_id": second, "folder": "",
+                    "files": [], "missing_sections": []}
+
+        monkeypatch.setattr(agents, "run_pipeline", blocking_pipeline)
+        queued_task = asyncio.create_task(registry.start(second))
+        await asyncio.sleep(0.05)
+
+        kinds = [event["type"] for event in registry.events(second)]
+        assert kinds == ["queued"], kinds
+        assert registry.state(second)["status"] == "queued"
+
+        release.set()
+        await holder
+        await queued_task
+        assert registry.state(second)["status"] == "complete"
+
+    asyncio.run(scenario())
+
+
 def test_state_of_unknown_run_is_404(client):
     assert client.get("/api/run/no-such-run-20260101-0000/state").status_code == 404
 

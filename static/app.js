@@ -187,6 +187,12 @@ function elapsed() {
 
 function handleEvent(event) {
   switch (event.type) {
+    case "queued":
+      // Waiting on the concurrency cap, not stuck.
+      el("progress-status").textContent =
+        `${event.message} This run starts automatically when a slot frees.`;
+      break;
+
     case "agent_start":
       state.streaming = "";
       state.thinking = 0;
@@ -237,6 +243,8 @@ function handleEvent(event) {
       el("progress-status").textContent =
         `${event.message}${event.hint ? ` → ${event.hint}` : ""}` +
         (done ? `  (${done} agent${done > 1 ? "s" : ""} finished; retry resumes there)` : "");
+      // Runs are atomic, so nothing was written — retry picks up where it broke.
+      el("retry-button").hidden = false;
       break;
     }
   }
@@ -246,6 +254,22 @@ async function cancelRun() {
   if (!state.runId) return;
   await api(`/api/run/${state.runId}/cancel`, { method: "POST" });
   el("progress-status").textContent = "Cancelling…";
+}
+
+async function retryRun() {
+  if (!state.runId) return;
+  el("retry-button").hidden = true;
+  el("cancel-button").hidden = false;
+  el("progress-status").textContent = "Retrying from the failed agent…";
+  try {
+    await api(`/api/run/${state.runId}/retry`, { method: "POST" });
+    // The previous socket closed on the error event; the server dropped that
+    // event when preparing the retry, so reconnecting resumes cleanly.
+    connectSocket(state.runId);
+  } catch (error) {
+    el("progress-status").textContent = `Retry failed: ${error.message}`;
+    el("retry-button").hidden = false;
+  }
 }
 
 /* --- Results ----------------------------------------------------------- */
@@ -381,6 +405,13 @@ async function loadHistory() {
 
     const buttons = document.createElement("span");
     buttons.className = "history-buttons";
+
+    const rerun = document.createElement("button");
+    rerun.className = "history-action";
+    rerun.title = "Re-run this topic (writes a new timestamped folder)";
+    rerun.textContent = "↻";
+    buttons.append(rerun);
+
     const remove = document.createElement("button");
     remove.className = "history-action";
     remove.dataset.act = "delete";
@@ -391,6 +422,14 @@ async function loadHistory() {
     item.append(label, buttons);
 
     item.onclick = () => loadRun(run.run_id);
+
+    rerun.onclick = (clickEvent) => {
+      clickEvent.stopPropagation();
+      // A fresh run in a new timestamped folder — the original is untouched, so
+      // output can be compared across prompt revisions.
+      startRun(run.topic);
+    };
+
     remove.onclick = async (clickEvent) => {
       clickEvent.stopPropagation();
       if (!confirm(`Delete "${run.topic}"? This removes the folder from disk.`)) return;
@@ -520,6 +559,7 @@ el("topic-input").onkeydown = (keyEvent) => {
   if (keyEvent.key === "Enter") startRun();
 };
 el("cancel-button").onclick = cancelRun;
+el("retry-button").onclick = retryRun;
 el("copy-button").onclick = copyActive;
 el("copy-linkedin-button").onclick = copyForLinkedIn;
 el("download-button").onclick = downloadActive;
