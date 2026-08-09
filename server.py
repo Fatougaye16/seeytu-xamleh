@@ -138,6 +138,15 @@ class RunRegistry:
             # touching subscriber queues, which are not thread-safe.
             loop.call_soon_threadsafe(self._publish, run, event)
 
+        if self._semaphore.locked():
+            # Tell the client it is waiting on the concurrency cap rather than
+            # leaving it staring at a tracker where nothing ever starts.
+            self._publish(run, {
+                "type": "queued", "run_id": run_id,
+                "message": f"Waiting — {config.MAX_CONCURRENT_RUNS} run"
+                           f"{'s' if config.MAX_CONCURRENT_RUNS > 1 else ''} already in progress.",
+            })
+
         async with self._semaphore:
             if run["cancel"]:
                 self._publish(run, {
@@ -170,14 +179,23 @@ class RunRegistry:
                 })
                 run["status"] = "failed"
 
-    async def retry(self, run_id: str) -> None:
-        """Resume a failed run at the failed agent, reusing completed output."""
+    def prepare_retry(self, run_id: str) -> None:
+        """Validate and reset a failed run so start() can resume it.
+
+        Deliberately synchronous and separate from start(): awaiting the
+        pipeline inside the HTTP handler would hold the request open for the
+        entire run — minutes — and the browser would appear to hang.
+        """
         run = self._require(run_id)
         if run["status"] not in {"failed", "cancelled"}:
             raise HTTPException(status_code=409, detail="Run is not in a retryable state")
         run["cancel"] = False
         run["status"] = "queued"
-        await self.start(run_id)
+        # Drop the previous terminal event so a reconnecting client does not
+        # replay the old failure and immediately close again.
+        run["events"] = [
+            event for event in run["events"] if event["type"] not in TERMINAL_EVENTS
+        ]
 
 
 registry = RunRegistry()
@@ -240,7 +258,9 @@ def cancel_run(run_id: str) -> dict:
 
 @app.post("/api/run/{run_id}/retry")
 async def retry_run(run_id: str) -> dict:
-    await registry.retry(run_id)
+    """Resume a failed run at the agent that failed, reusing completed output."""
+    registry.prepare_retry(run_id)
+    asyncio.create_task(registry.start(run_id))
     return registry.state(run_id)
 
 
