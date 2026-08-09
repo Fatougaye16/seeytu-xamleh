@@ -353,9 +353,10 @@ def test_websocket_on_unknown_run_reports_an_error(client):
 
 
 def test_resources_lifecycle_over_http(client):
-    assert client.get("/api/resources").json() == {
-        "resources": [], "hint": "Markdown and text files. 5 MB per file."
-    }
+    # Shape, not wording — the hint is user-facing copy and will be reworded.
+    empty = client.get("/api/resources").json()
+    assert empty["resources"] == []
+    assert empty["hint"]
 
     created = client.post(
         "/api/resources",
@@ -378,7 +379,7 @@ def test_unsupported_file_type_returns_415(client):
         "/api/resources", json={"kind": "file", "name": "paper.pdf", "content": "x"}
     )
     assert response.status_code == 415
-    assert "parser" in response.json()["detail"]
+    assert "supported" in response.json()["detail"].lower()
 
 
 def test_blank_resource_name_is_rejected(client):

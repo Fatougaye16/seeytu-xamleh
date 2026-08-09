@@ -1,8 +1,3 @@
-<!-- EDIT THIS FILE. Every agent receives it verbatim, so the more specific you
-     are, the more the output sounds like you and not like a generic AI.
-     Cloud mode transmits this file to Ollama's servers on every agent call —
-     keep out anything you would not send to a third party. -->
-
 ## Who I am
 
 I work in technology and I am drawn to how tech intersects with other domains —

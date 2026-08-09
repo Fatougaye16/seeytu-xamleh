@@ -85,6 +85,16 @@ as plain files under `resources_data/`, which is gitignored.
 PDF, docx and epub are **not** supported yet: they need parsers that would take the dependency list
 from three to six. The UI says so rather than accepting a file it cannot read.
 
+**Links are checked before they're fetched.** A pasted URL is untrusted input, so any host that
+resolves to a private, loopback, or link-local address is refused — otherwise a link could point at
+your router, the Ollama daemon, or a cloud metadata endpoint, and the response would end up in the
+Scout's context and, in cloud mode, at a third party. Redirects are followed one hop at a time and
+re-checked. If you genuinely want to index an intranet page or a local dev server:
+
+```bash
+ALLOW_PRIVATE_FETCH=1 python run.py
+```
+
 ## Make it yours
 
 Three files, in the order you'll want them:

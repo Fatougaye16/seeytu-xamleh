@@ -27,7 +27,7 @@ TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".text"}
 UNSUPPORTED_SUFFIXES = {".pdf", ".docx", ".epub", ".doc", ".rtf"}
 MAX_BYTES = 5 * 1024 * 1024
 
-DROPZONE_HINT = "Markdown and text files. 5 MB per file."
+DROPZONE_HINT = "Text and Markdown files, up to 5 MB each."
 
 _ID = re.compile(r"^[a-z0-9][a-z0-9\-]{0,119}$")
 
@@ -170,9 +170,11 @@ def _assert_public_host(url: str) -> None:
             or not address.is_global
         )
         if blocked:
+            # Kept plain for the reader; the technical reason and the opt-in are
+            # documented in the README rather than shouted in a toast.
             raise ValueError(
-                f"{host} resolves to {address}, which is not a public address. "
-                "Set ALLOW_PRIVATE_FETCH=1 if you really mean to index a local host."
+                f"That link points to a private address on your own network "
+                f"({address}), so it wasn't opened."
             )
 
 
@@ -225,11 +227,13 @@ def add(kind: str, name: str, content: str | None = None) -> dict:
         suffix = Path(name).suffix.lower()
         if suffix in UNSUPPORTED_SUFFIXES:
             raise UnsupportedResource(
-                f"{suffix} files need a parser this build does not ship. "
-                "Markdown and text only for now."
+                f"{suffix.lstrip('.').upper()} files aren't supported yet — "
+                "text and Markdown files only for now."
             )
         if suffix and suffix not in TEXT_SUFFIXES:
-            raise UnsupportedResource(f"Unsupported file type: {suffix}")
+            raise UnsupportedResource(
+                f"{suffix} files aren't supported — text and Markdown files only."
+            )
         body = content or ""
         label = name
         badge = "md" if suffix in {".md", ".markdown"} else "txt"

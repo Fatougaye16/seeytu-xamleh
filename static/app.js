@@ -65,8 +65,6 @@ const state = {
   activeTab: null,
   topic: "",
   streaming: "",
-  thinking: 0,
-  tokens: 0,
   agentStates: {},
   runStart: null,
   timer: null,
@@ -181,7 +179,12 @@ async function checkHealth() {
     }
     note.classList.remove("is-error");
     note.textContent = "";
-    el("model-pill").textContent = `${health.model} · ${health.mode}`;
+    // Plain label in the chrome; the exact model stays available on hover and
+    // in Settings for anyone who cares which one is running.
+    state.mode = health.mode;
+    const pill = el("model-pill");
+    pill.textContent = health.mode === "cloud" ? "Cloud AI" : "On this computer";
+    pill.title = health.model;
   } catch (error) {
     note.textContent = `Backend unreachable: ${error.message}`;
     note.classList.add("is-error");
@@ -269,7 +272,7 @@ function elapsedLabel() {
 function updateMeta() {
   const done = Object.values(state.agentStates).filter((s) => s === "done").length;
   el("pipeline-meta").textContent =
-    `${elapsedLabel()} elapsed · ${done} of ${AGENTS.length} agents complete`;
+    `${elapsedLabel()} so far · ${done} of ${AGENTS.length} agents finished`;
 }
 
 async function startRun(topicOverride) {
@@ -282,8 +285,6 @@ async function startRun(topicOverride) {
 
   state.topic = topic;
   state.streaming = "";
-  state.thinking = 0;
-  state.tokens = 0;
   buildPipelineCards();
   el("pipeline-eyebrow").textContent = "Pipeline running";
   el("pipeline-topic").textContent = topic;
@@ -335,7 +336,6 @@ function handleEvent(event) {
 
     case "agent_start": {
       state.streaming = "";
-      state.thinking = 0;
       const agent = AGENTS.find((a) => a.key === event.agent);
       setAgentState(event.agent, "running", { task: agent?.task, barWidth: "8%" });
       const body = agentEntryBody(event.agent);
@@ -348,14 +348,14 @@ function handleEvent(event) {
     }
 
     case "agent_thinking":
-      state.thinking += 1;
-      el("live-stats").textContent = `reasoning · ${state.thinking} thought tokens`;
+      // Some models reason before answering. How many tokens that took is
+      // meaningless to a reader; that something is happening is not.
+      el("live-stats").textContent = "Thinking…";
       break;
 
     case "agent_token": {
       state.streaming += event.delta;
-      state.tokens += 1;
-      el("live-stats").textContent = `streaming · ${state.tokens.toLocaleString()} tokens`;
+      el("live-stats").textContent = "Writing…";
       const text = agentEntryBody(event.agent).querySelector(".live-text");
       if (text) renderMarkdown(text, state.streaming);
       // Rough progress: the bar is a sign of life, not a measurement.
@@ -388,9 +388,9 @@ function handleEvent(event) {
       stopTimer();
       el("cancel-button").hidden = true;
       el("view-results-button").hidden = false;
-      el("pipeline-eyebrow").textContent = "Run complete";
+      el("pipeline-eyebrow").textContent = "All done";
       el("live-led").style.display = "none";
-      el("live-stats").textContent = `done · ${state.tokens.toLocaleString()} tokens`;
+      el("live-stats").textContent = "Finished";
       sessionStorage.removeItem("seeytu-run");
       loadRun(event.run_id, { push: true });
       loadHistory();
@@ -400,8 +400,8 @@ function handleEvent(event) {
       stopTimer();
       el("cancel-button").hidden = true;
       el("live-led").style.display = "none";
-      el("pipeline-eyebrow").textContent = "Cancelled";
-      el("live-stats").textContent = "cancelled — nothing written to disk";
+      el("pipeline-eyebrow").textContent = "Stopped";
+      el("live-stats").textContent = "Stopped — nothing was saved";
       break;
 
     case "error": {
@@ -409,8 +409,8 @@ function handleEvent(event) {
       el("cancel-button").hidden = true;
       el("retry-button").hidden = false;
       el("live-led").style.display = "none";
-      el("pipeline-eyebrow").textContent = "Run failed";
-      el("live-stats").textContent = "failed";
+      el("pipeline-eyebrow").textContent = "Something went wrong";
+      el("live-stats").textContent = "Stopped";
       if (event.agent) {
         setAgentState(event.agent, "failed", { task: "Failed" });
         const body = agentEntryBody(event.agent);
@@ -483,17 +483,21 @@ async function loadRun(runId, { push = true } = {}) {
   state.activeTab = state.run.files[0]?.key || null;
   el("results-topic").textContent = state.run.topic;
 
-  const created = (state.run.created_at || "").slice(0, 16).replace("T", " ");
-  el("results-meta").textContent =
-    [`${state.run.files.length} artifacts`, created, state.run.model, state.run.mode]
-      .filter(Boolean).join(" · ");
+  const created = (state.run.created_at || "").slice(0, 10);
+  const meta = el("results-meta");
+  meta.textContent =
+    `${state.run.files.length} documents · ${created}`;
+  // The model that produced it is real provenance, just not headline chrome.
+  meta.title = [state.run.model, state.run.mode].filter(Boolean).join(" · ");
 
   const warning = el("results-warning");
   if (state.run.missing_sections?.length) {
     warning.hidden = false;
     warning.textContent =
-      `The writer's output could not be split into: ${state.run.missing_sections.join(", ")}. ` +
-      `The full response is in the "Raw Writer Output" tab, so nothing was lost.`;
+      "Some pieces could not be separated into their own documents this time. " +
+      `Nothing is missing — you'll find everything in the "${
+        state.run.files.find((f) => f.key === "combined")?.label || "full draft"
+      }" tab.`;
   } else {
     warning.hidden = true;
   }
@@ -552,7 +556,7 @@ async function copyForLinkedIn() {
   if (!file || !state.run) return;
   const response = await fetch(`/api/runs/${state.run.run_id}/${file.filename}?plain=1`);
   await navigator.clipboard.writeText(await response.text());
-  toast("Copied as plain text — verify block removed");
+  toast("Copied — ready to paste into LinkedIn");
 }
 
 function downloadActive() {
@@ -623,7 +627,7 @@ async function loadHistory() {
 
     const rerun = document.createElement("button");
     rerun.className = "icon-action";
-    rerun.title = "Re-run — writes a new timestamped folder";
+    rerun.title = "Run this topic again — your earlier results are kept";
     rerun.innerHTML = svg("M21 12a9 9 0 1 1-3-6.7M21 3v6h-6", 14, 2);
     rerun.onclick = (clickEvent) => {
       clickEvent.stopPropagation();
@@ -636,7 +640,7 @@ async function loadHistory() {
     remove.innerHTML = svg("M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13", 14, 2);
     remove.onclick = async (clickEvent) => {
       clickEvent.stopPropagation();
-      if (!confirm(`Delete "${run.topic}"? This removes the folder from disk.`)) return;
+      if (!confirm(`Delete "${run.topic}" and all its documents? This can't be undone.`)) return;
       await api(`/api/runs/${run.run_id}`, { method: "DELETE" });
       if (state.run?.run_id === run.run_id) showView("home");
       loadHistory();
@@ -672,8 +676,8 @@ async function loadResources() {
     empty.className = "empty-state";
     empty.textContent =
       error.status === 404
-        ? "Resources are not wired up in this build yet."
-        : `Could not load resources: ${error.message}`;
+        ? "Your library isn't available right now."
+        : `Couldn't load your library: ${error.message}`;
     list.append(empty);
     return;
   }
@@ -684,9 +688,10 @@ function renderResources() {
   const list = el("res-list");
   const active = state.resources.filter((r) => r.enabled).length;
   el("resource-count").textContent = String(state.resources.length);
-  el("res-stats").textContent =
-    `${active} of ${state.resources.length} active · ` +
-    `${state.resources.reduce((sum, r) => sum + (r.words || 0), 0).toLocaleString()} words`;
+  el("res-stats").textContent = state.resources.length
+    ? `${active} of ${state.resources.length} in use · ` +
+      `${state.resources.reduce((sum, r) => sum + (r.words || 0), 0).toLocaleString()} words`
+    : "Nothing added yet";
 
   list.innerHTML = "";
   if (!state.resources.length) {
@@ -825,16 +830,18 @@ async function openSettings() {
     const [cfg, profile] = await Promise.all([api("/api/config"), api("/api/profile")]);
     setTemperature(cfg.temperature);
     el("profile-editor").value = profile.content;
-    el("profile-path").textContent = profile.path.split(/[\\/]/).pop();
-    el("model-hint").textContent =
-      `Applies to all four agents · num_ctx ${cfg.num_ctx} · max_tokens ${cfg.max_tokens}`;
+    // The privacy consequence differs by mode, and it is the part worth saying.
+    el("profile-privacy").textContent =
+      state.mode === "cloud"
+        ? "Sent to the AI service with every request, along with your topic."
+        : "Stays on this computer — nothing is sent anywhere.";
 
     const models = await modelsPromise;
     select.disabled = false;
     select.innerHTML = "";
     for (const [label, names] of [
-      ["Cloud — fast, needs `ollama signin`", models.cloud],
-      ["Installed locally — private, slower", models.local],
+      ["Cloud — faster, needs an internet connection", models.cloud],
+      ["On this computer — private, but slower", models.local],
     ]) {
       if (!names.length) continue;
       const group = document.createElement("optgroup");
@@ -853,7 +860,7 @@ async function openSettings() {
     if (!Array.from(select.options).some((o) => o.selected)) {
       const option = document.createElement("option");
       option.value = cfg.model;
-      option.textContent = `${cfg.model} (not installed)`;
+      option.textContent = `${cfg.model} — not available`;
       option.selected = true;
       select.prepend(option);
     }
@@ -870,9 +877,12 @@ function closeSettings() {
 }
 
 function setTemperature(value) {
-  const pct = `${Math.round(Number(value) * 100)}%`;
+  const number = Number(value);
+  const pct = `${Math.round(number * 100)}%`;
   el("temperature-slider").value = value;
-  el("temperature-value").textContent = Number(value).toFixed(2);
+  // A word says more than "0.70" to someone who has never tuned a model.
+  el("temperature-value").textContent =
+    number <= 0.3 ? "Focused" : number >= 0.75 ? "Creative" : "Balanced";
   el("temp-fill").style.width = pct;
   el("temp-knob").style.left = pct;
 }
@@ -988,7 +998,9 @@ buildExamples();
 buildAgentGrid();
 buildPipelineCards();
 showView("home", { push: false });
-el("sidebar-foot").textContent = `local · ${location.host}`;
+// Host and port live in the tooltip, not the label — the label just needs to
+// reassure the reader that this is not a website.
+el("sidebar-foot").title = location.host;
 checkHealth();
 loadHistory();
 loadResources();

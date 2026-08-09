@@ -38,7 +38,7 @@
   <div class="sidebar-heading">History</div>
   <ul id="history-list" class="history-list"></ul>
 
-  <div class="sidebar-foot" id="sidebar-foot">local</div>
+  <div class="sidebar-foot" id="sidebar-foot">Running on your computer</div>
 </aside>
 
 <main id="main">
@@ -107,8 +107,8 @@
             <div class="eyebrow">Your library</div>
             <h2 class="page-title" style="margin-top:10px;">My resources</h2>
             <p class="res-lede">
-              Files, links, and notes the Scout reads before it searches anywhere else.
-              Everything stays on this machine.
+              Add your own files, links, and notes. The Scout reads these first, so the research
+              starts from your material instead of guesswork.
             </p>
           </div>
           <div class="res-stats" id="res-stats">0 of 0 active</div>
@@ -125,7 +125,7 @@
             </span>
             <div class="dropzone-title">Drop files here</div>
             <div class="dropzone-hint" id="dropzone-hint">
-              Markdown and text files. 5 MB per file.
+              Text and Markdown files, up to 5 MB each.
             </div>
             <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.text"
                    class="visually-hidden">
@@ -139,7 +139,7 @@
                 <input id="link-input" class="text-input" placeholder="https://">
                 <button id="link-button" class="btn-ghost">Fetch</button>
               </div>
-              <div class="field-hint">Pages are fetched once and stored as markdown.</div>
+              <div class="field-hint">We save a copy, so the page is read the same way every time.</div>
             </div>
             <div class="field">
               <label class="eyebrow" for="note-input">Paste a note</label>
@@ -244,8 +244,8 @@
         </div>
         <p id="results-warning" class="warning" hidden></p>
         <p class="verify-note">
-          Every draft ends with a <strong>Verify before publishing</strong> block. No model here
-          has web access — check those claims before anything goes out under your name.
+          <strong>AI-generated content can be inaccurate.</strong> Check anything that matters —
+          names, numbers, dates, links — before you rely on it or share it.
         </p>
         <article id="result-panel" class="markdown" role="tabpanel"></article>
       </div>
@@ -267,14 +267,14 @@
 
     <div class="settings-body">
       <div class="field">
-        <label class="eyebrow" for="model-select">Model</label>
+        <label class="eyebrow" for="model-select">Which AI to use</label>
         <select id="model-select" class="select-input"></select>
-        <div class="field-hint" id="model-hint">Applies to all four agents.</div>
+        <div class="field-hint" id="model-hint">Used by all four agents.</div>
       </div>
 
       <div class="field">
         <div class="temp-head">
-          <label class="eyebrow" for="temperature-slider">Temperature</label>
+          <label class="eyebrow" for="temperature-slider">Writing style</label>
           <span class="temp-value" id="temperature-value">0.70</span>
         </div>
         <div class="temp-track">
@@ -282,16 +282,19 @@
           <div class="temp-knob" id="temp-knob"></div>
         </div>
         <input id="temperature-slider" type="range" min="0" max="1" step="0.05" value="0.7">
-        <div class="temp-scale"><span>0 · precise</span><span>1 · loose</span></div>
+        <div class="temp-scale"><span>Focused</span><span>Creative</span></div>
       </div>
 
       <div class="field">
-        <label class="eyebrow" for="profile-editor">My profile</label>
-        <div class="field-hint">Context every agent reads before it starts.</div>
-        <textarea id="profile-editor" class="textarea-input" rows="10" spellcheck="false"></textarea>
+        <label class="eyebrow" for="profile-editor">About me</label>
         <div class="field-hint">
-          Saved to <code id="profile-path">profile.md</code>. Cloud mode transmits this to
-          Ollama's servers.
+          Tell the agents who you are and how you like to learn. They read this before
+          they start, and it is the biggest thing you can change to make the writing
+          sound like you.
+        </div>
+        <textarea id="profile-editor" class="textarea-input" rows="10" spellcheck="false"></textarea>
+        <div class="field-hint" id="profile-privacy">
+          Sent to the AI with every request.
         </div>
       </div>
 
