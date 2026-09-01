@@ -28,14 +28,23 @@ jobs:
       - name: Test
         run: pytest tests/ -v
 
-  # The frontend has no test runner yet; this at least catches a syntax error
-  # in the one file that ships unbundled to the browser.
-  frontend-syntax:
+  # Dev-only tooling: vitest drives the real static/app.js in JSDOM. Nothing
+  # here is needed to run the app, which still ships unbundled.
+  frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
       - name: Check app.js parses
         run: node --check static/app.js
+
+      - name: Test
+        run: npm test

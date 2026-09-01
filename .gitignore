@@ -4,3 +4,4 @@ __pycache__/
 output/
 resources_data/
 .venv/
+node_modules/

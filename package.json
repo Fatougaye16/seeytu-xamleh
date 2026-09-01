@@ -1,0 +1,13 @@
+{
+  "name": "seeytu-xamleh",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only tooling. The app itself ships unbundled: no build step, no runtime JS dependencies beyond the vendored libraries in static/vendor.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.0",
+    "vitest": "^3.2.4"
+  }
+}
