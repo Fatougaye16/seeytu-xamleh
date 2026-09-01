@@ -98,6 +98,30 @@ function renderMarkdown(target, markdown) {
   target.querySelectorAll("pre code").forEach((block) => hljs.highlightElement(block));
 }
 
+/* Streaming renders are coalesced to one per animation frame.
+ *
+ * Rendering on every token is quadratic: each delta re-parses, re-sanitizes and
+ * re-highlights the *entire* accumulated document, so an 8k-token answer does
+ * 8k passes over a string that keeps growing. Cloud models arrive at ~44
+ * tokens/sec, which is more than fast enough to make that visible. One render
+ * per frame is as much as the screen can show anyway. */
+let streamFrame = null;
+
+function cancelStreamRender() {
+  if (streamFrame !== null) {
+    cancelAnimationFrame(streamFrame);
+    streamFrame = null;
+  }
+}
+
+function scheduleStreamRender(target) {
+  if (streamFrame !== null) return;
+  streamFrame = requestAnimationFrame(() => {
+    streamFrame = null;
+    renderMarkdown(target, state.streaming);
+  });
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: options.body ? { "Content-Type": "application/json" } : {},
@@ -335,6 +359,7 @@ function handleEvent(event) {
       break;
 
     case "agent_start": {
+      cancelStreamRender();
       state.streaming = "";
       const agent = AGENTS.find((a) => a.key === event.agent);
       setAgentState(event.agent, "running", { task: agent?.task, barWidth: "8%" });
@@ -357,7 +382,7 @@ function handleEvent(event) {
       state.streaming += event.delta;
       el("live-stats").textContent = "Writing…";
       const text = agentEntryBody(event.agent).querySelector(".live-text");
-      if (text) renderMarkdown(text, state.streaming);
+      if (text) scheduleStreamRender(text);
       // Rough progress: the bar is a sign of life, not a measurement.
       const card = el(`pipe-${event.agent}`);
       if (card) {
@@ -368,6 +393,9 @@ function handleEvent(event) {
     }
 
     case "agent_complete": {
+      // Drop any frame still queued: it would repaint the body this branch is
+      // about to replace, with text that is now one render behind.
+      cancelStreamRender();
       setAgentState(event.agent, "done", { task: "Complete", barWidth: "100%" });
       const words = event.output.trim().split(/\s+/).length;
       const body = agentEntryBody(event.agent);
@@ -385,6 +413,7 @@ function handleEvent(event) {
     }
 
     case "pipeline_complete":
+      cancelStreamRender();
       stopTimer();
       el("cancel-button").hidden = true;
       el("view-results-button").hidden = false;
@@ -397,6 +426,7 @@ function handleEvent(event) {
       break;
 
     case "cancelled":
+      cancelStreamRender();
       stopTimer();
       el("cancel-button").hidden = true;
       el("live-led").style.display = "none";
@@ -405,6 +435,7 @@ function handleEvent(event) {
       break;
 
     case "error": {
+      cancelStreamRender();
       stopTimer();
       el("cancel-button").hidden = true;
       el("retry-button").hidden = false;

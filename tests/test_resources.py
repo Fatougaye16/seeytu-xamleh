@@ -1,3 +1,5 @@
+import contextlib
+
 import pytest
 
 import config
@@ -422,3 +424,207 @@ def test_a_failed_status_still_releases_the_connection(monkeypatch):
     with pytest.raises(ValueError, match="Could not fetch"):
         resources.add("url", "https://example.dev/missing")
     assert response.closed, "a non-2xx response must be closed too"
+
+
+# --- DNS rebinding -------------------------------------------------------
+
+def test_the_validated_address_is_the_one_connected_to(monkeypatch):
+    """Close the gap between the safety check and the connection.
+
+    _assert_public_host resolves the host, and requests then resolves it again.
+    A hostname whose DNS answer changes between those two lookups passes the
+    check and connects somewhere else — the classic rebinding bypass. The
+    address that was vetted must be the address that is used.
+    """
+    _public_dns(monkeypatch)
+    answers = iter([
+        # First lookup: the vetted, public answer.
+        [(resources.socket.AF_INET, 0, 0, "", ("93.184.216.34", 443))],
+        # Second lookup, had requests been allowed one: the attacker's target.
+        [(resources.socket.AF_INET, 0, 0, "", ("169.254.169.254", 443))],
+    ])
+    monkeypatch.setattr(
+        resources.socket, "getaddrinfo", lambda *a, **k: next(answers)
+    )
+
+    connected_to = []
+
+    def fake_get(url, **kwargs):
+        # Whatever the transport would resolve now is what actually gets used.
+        connected_to.extend(
+            info[4][0]
+            for info in resources.socket.getaddrinfo("public.example", 443)
+        )
+        return _StreamedResponse(
+            [b"<html><title>Ok</title><body><p>fetched fine</p></body></html>"]
+        )
+
+    monkeypatch.setattr(resources.requests, "get", fake_get)
+    resources.add("url", "https://public.example/page")
+
+    assert connected_to == ["93.184.216.34"], (
+        f"connected to {connected_to}; the rebound address won the race"
+    )
+
+
+def test_dns_pinning_is_torn_down_after_the_fetch(monkeypatch):
+    """The pin must not outlive the request that needed it."""
+    _public_dns(monkeypatch)
+    original = resources.socket.getaddrinfo
+    monkeypatch.setattr(
+        resources.requests,
+        "get",
+        lambda *a, **k: _StreamedResponse(
+            [b"<html><title>Ok</title><body><p>fetched fine</p></body></html>"]
+        ),
+    )
+
+    resources.add("url", "https://public.example/page")
+
+    assert resources.socket.getaddrinfo is original
+
+
+def test_dns_pinning_is_torn_down_even_when_the_fetch_fails(monkeypatch):
+    _public_dns(monkeypatch)
+    original = resources.socket.getaddrinfo
+
+    def explode(*args, **kwargs):
+        raise resources.requests.ConnectionError("refused")
+
+    monkeypatch.setattr(resources.requests, "get", explode)
+
+    with pytest.raises(ValueError, match="Could not fetch"):
+        resources.add("url", "https://public.example/page")
+    assert resources.socket.getaddrinfo is original
+
+
+def test_only_one_fetch_holds_the_dns_pin_at_a_time(monkeypatch):
+    """Overlapping fetches would restore each other's resolver.
+
+    _pinned_dns swaps a module-level global, so two fetches running at once
+    could leave the pin of the slower one installed permanently, or tear the
+    faster one's pin down mid-connection.
+    """
+    _public_dns(monkeypatch)
+    held = []
+
+    def fake_get(url, **kwargs):
+        held.append(resources._FETCH_LOCK.locked())
+        return _StreamedResponse(
+            [b"<html><title>Ok</title><body><p>fetched fine</p></body></html>"]
+        )
+
+    monkeypatch.setattr(resources.requests, "get", fake_get)
+    resources.add("url", "https://public.example/page")
+
+    assert held == [True], "the fetch must hold the lock while DNS is pinned"
+
+
+def test_a_concurrent_fetch_leaves_the_resolver_intact(monkeypatch):
+    """Two threads fetching at once must still restore the real resolver."""
+    import threading as _threading
+
+    _public_dns(monkeypatch)
+    original = resources.socket.getaddrinfo
+    barrier = _threading.Barrier(2, timeout=5)
+
+    def fake_get(url, **kwargs):
+        with contextlib.suppress(_threading.BrokenBarrierError):
+            barrier.wait()
+        return _StreamedResponse(
+            [b"<html><title>Ok</title><body><p>fetched fine</p></body></html>"]
+        )
+
+    monkeypatch.setattr(resources.requests, "get", fake_get)
+
+    errors = []
+
+    def worker(index):
+        try:
+            resources.add("url", f"https://public.example/page-{index}")
+        except Exception as exc:  # noqa: BLE001 - surfaced via `errors`
+            errors.append(exc)
+
+    threads = [_threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors, errors
+    assert resources.socket.getaddrinfo is original
+
+
+# --- Index integrity -----------------------------------------------------
+
+def test_concurrent_adds_do_not_lose_entries():
+    """index.json is read, mutated and rewritten — a classic lost update.
+
+    Two adds that interleave both read the same list and both write their own
+    version of it. The second write wins and the first resource vanishes from
+    the library while its markdown file stays on disk.
+    """
+    import threading as _threading
+
+    errors = []
+
+    def worker(index):
+        try:
+            resources.add("note", f"note {index}", f"body of note {index}")
+        except Exception as exc:  # noqa: BLE001 - surfaced via `errors`
+            errors.append(exc)
+
+    threads = [_threading.Thread(target=worker, args=(i,)) for i in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors, errors
+    assert len(resources.listing()) == 12
+
+
+def test_concurrent_adds_all_get_distinct_ids():
+    import threading as _threading
+
+    def worker(index):
+        resources.add("note", "same name", f"body {index}")
+
+    threads = [_threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    ids = [entry["id"] for entry in resources.listing()]
+    assert len(ids) == len(set(ids)) == 8, f"ids collided: {ids}"
+
+
+def test_a_failed_index_write_leaves_the_previous_index_intact(monkeypatch):
+    """A half-written index.json would take the whole library with it."""
+    resources.add("note", "first", "the first body")
+    before = resources._index_path().read_text(encoding="utf-8")
+
+    def failing_replace(self, target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(resources.Path, "replace", failing_replace)
+
+    with pytest.raises(OSError):
+        resources.add("note", "second", "the second body")
+
+    assert resources._index_path().read_text(encoding="utf-8") == before
+
+
+def test_a_failed_index_write_leaves_no_temp_file_behind(monkeypatch):
+    resources.add("note", "first", "the first body")
+
+    def failing_replace(self, target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(resources.Path, "replace", failing_replace)
+    with pytest.raises(OSError):
+        resources.add("note", "second", "the second body")
+
+    leftovers = [p.name for p in resources._root().iterdir() if p.suffix == ".tmp"]
+    assert leftovers == [], f"temp files left behind: {leftovers}"

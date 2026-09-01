@@ -33,8 +33,14 @@ Every task's requirements implicitly include this section.
   in scope. `pytest` remains a dev-only dependency.
 - ~~**Forbidden**: LangChain, CrewAI, or any agent framework. No database. No Docker.~~
   **Retired 2026-08-18 (D1).** LangGraph is now the intended orchestration layer and Docker is the
-  intended delivery format. Still binding from this bullet: **no React/npm/Node build step**, and
+  intended delivery format. Still binding from this bullet: **no React and no build step** — the
+  frontend ships to the browser exactly as it sits in `static/`, with its libraries vendored — and
   **no authentication**.
+- **npm is allowed for dev tooling only** (amended 2026-09-01). `package.json` carries
+  `devDependencies` and nothing else: `vitest` and `jsdom`, used to test `static/app.js`. No
+  bundler, no transpiler, no runtime dependency, and no npm install required to *run* the app —
+  `pip install -r requirements.txt && python run.py` is still the whole story. The constraint that
+  matters is that the shipped frontend is unbundled, and that is unchanged.
 - **`call_model()` is the single Ollama chokepoint.** No other function may issue an Ollama request.
   It is the designated swap point for Claude or Gemini later.
 - **Model**: cloud-first (`gpt-oss:120b-cloud` default), auto-detected local fallback. Cloud and
