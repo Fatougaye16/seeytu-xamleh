@@ -28,10 +28,13 @@ Every task's requirements implicitly include this section.
 - **Name**: full name is `Seeytu-Xamleh`, short form `Seeytu` where space is tight (browser tab, CLI
   prompt). Tagline: `Explore. Learn. Publish.` Both appear in the web header, tab title, CLI banner,
   README, and terminal output.
-- **Runtime deps — exactly three**: `fastapi`, `uvicorn`, `requests`. `python-multipart` is **not**
-  required (no endpoint accepts form data or uploads). `pytest` is a dev-only dependency.
-- **Forbidden**: LangChain, CrewAI, or any agent framework. No React/npm/Node build step. No
-  database. No Docker. No authentication.
+- ~~**Runtime deps — exactly three**: `fastapi`, `uvicorn`, `requests`.~~ **Retired 2026-08-18 (D1).**
+  The dependency budget no longer constrains design; LangGraph and an OpenAI-compatible client are
+  in scope. `pytest` remains a dev-only dependency.
+- ~~**Forbidden**: LangChain, CrewAI, or any agent framework. No database. No Docker.~~
+  **Retired 2026-08-18 (D1).** LangGraph is now the intended orchestration layer and Docker is the
+  intended delivery format. Still binding from this bullet: **no React/npm/Node build step**, and
+  **no authentication**.
 - **`call_model()` is the single Ollama chokepoint.** No other function may issue an Ollama request.
   It is the designated swap point for Claude or Gemini later.
 - **Model**: cloud-first (`gpt-oss:120b-cloud` default), auto-detected local fallback. Cloud and
@@ -66,6 +69,34 @@ Every task's requirements implicitly include this section.
 | 12 | Word counts | Targets, not gates; actual count displayed per piece |
 | 13 | Hallucination | No-hedging prose **plus** a "Verify before publishing" block per agent |
 | 14 | Misc | Vendor JS libs, auto-select a free port, sanitize rendered markdown |
+
+> **Amended 2026-08-18.** Decisions **1, 5, 6, 11 and 12 remain binding** and must still be honoured
+> by the migration. The rest of this table describes the pre-migration build and is historical
+> context, not a review checklist.
+
+## Amendment — LangGraph + Docker migration (2026-08-18)
+
+Two architecture decisions supersede parts of this document. Everything above is written for the
+pre-migration build; read it through these.
+
+**D1 — Four global constraints are retired.** No longer binding, and no longer grounds for a review
+comment: *no agent framework*, *no Docker*, *no database*, *exactly three runtime dependencies*.
+Amending this document is explicitly in scope for the migration. Constraints **not** retired and
+still fully in force: the `call_model()` chokepoint, explicit `num_ctx`, idle-based timeouts,
+`encoding="utf-8"` on every write, atomic runs, `127.0.0.1` binding with path validation against
+`OUTPUT_DIR`, no Node build step, and no authentication.
+
+**D2 — It ships as one change, not phased.** LangGraph, the OpenAI-compatible client, Docker and MCP
+land together. A two-phase split was proposed and declined. The agreed mitigation is to sequence the
+work internally with a green checkpoint (full suite passing) at each step:
+
+1. Graph — port the four-agent sequence onto LangGraph, event contract unchanged.
+2. Client swap — replace the Ollama call inside `call_model()` with an OpenAI-compatible client.
+3. Containerize — Docker as the delivery format.
+4. MCP tools — behind an off-switch, default off.
+
+**Open blocking question:** which model backs the Docker Model Runner path. DMR cannot serve the
+current `gpt-oss:120b-cloud` default, so step 3 cannot be specified until this is settled.
 
 ---
 

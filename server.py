@@ -24,6 +24,11 @@ app = FastAPI(title=config.APP_NAME, description=config.TAGLINE)
 # Event types that end a run, and therefore end a WebSocket subscription.
 TERMINAL_EVENTS = {"pipeline_complete", "error", "cancelled"}
 
+# Per-token events. Live subscribers need every one of them; a subscriber
+# arriving after the run ended needs none, because agent_complete carries the
+# finished text. They are dropped from the buffer at the terminal event.
+STREAM_EVENTS = {"agent_token", "agent_thinking"}
+
 
 # --- Request models ------------------------------------------------------
 
@@ -82,6 +87,10 @@ class RunRegistry:
 
     def __init__(self) -> None:
         self._runs: dict[str, dict] = {}
+        # Run ids that have reached a terminal event, oldest first. Eviction
+        # works from this list rather than from _runs so a queued or running
+        # run can never be dropped out from under its subscribers.
+        self._finished: list[str] = []
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_RUNS)
 
     def create(self, topic: str, model: str | None, temperature: float | None) -> str:
@@ -142,6 +151,30 @@ class RunRegistry:
             run["completed"][key] = event["output"]
         for queue in list(run["subscribers"]):
             queue.put_nowait(event)
+        if event["type"] in TERMINAL_EVENTS:
+            # Fan-out happens first: live subscribers have already seen every
+            # token, so compacting now costs them nothing.
+            self._compact(run)
+            self._retire(run["run_id"])
+
+    def _compact(self, run: dict) -> None:
+        """Drop per-token events from a finished run's replay buffer.
+
+        A four-agent run emits one event per token — tens of thousands of dicts
+        that are pure overhead once the run is over, since replay reconstructs
+        the same view from agent_complete alone.
+        """
+        run["events"] = [
+            event for event in run["events"] if event["type"] not in STREAM_EVENTS
+        ]
+
+    def _retire(self, run_id: str) -> None:
+        """Mark a run finished and evict the oldest finished runs past the cap."""
+        if run_id in self._finished:
+            self._finished.remove(run_id)
+        self._finished.append(run_id)
+        while len(self._finished) > max(1, config.MAX_RETAINED_RUNS):
+            self._runs.pop(self._finished.pop(0), None)
 
     async def start(self, run_id: str) -> None:
         """Run the pipeline in a worker thread, bounded by the concurrency cap."""
@@ -206,6 +239,9 @@ class RunRegistry:
             raise HTTPException(status_code=409, detail="Run is not in a retryable state")
         run["cancel"] = False
         run["status"] = "queued"
+        # Active again: take it off the eviction list until it finishes anew.
+        if run_id in self._finished:
+            self._finished.remove(run_id)
         # Drop the previous terminal event so a reconnecting client does not
         # replay the old failure and immediately close again.
         run["events"] = [

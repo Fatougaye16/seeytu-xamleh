@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import agents
@@ -426,3 +427,127 @@ def test_index_is_served(client):
     response = client.get("/")
     assert response.status_code == 200
     assert config.APP_NAME in response.text
+
+
+# --- Event buffer compaction --------------------------------------------
+
+def _publish_agent(registry, run, agent, step, deltas, output):
+    """Drive one agent's worth of events straight through the registry."""
+    registry._publish(run, {
+        "type": "agent_start", "agent": agent, "step": step, "total": 4,
+    })
+    for delta in deltas:
+        registry._publish(run, {
+            "type": "agent_thinking", "agent": agent, "step": step, "delta": delta,
+        })
+        registry._publish(run, {
+            "type": "agent_token", "agent": agent, "step": step, "delta": delta,
+        })
+    registry._publish(run, {
+        "type": "agent_complete", "agent": agent, "step": step, "output": output,
+    })
+
+
+def test_token_events_are_dropped_once_the_run_reaches_a_terminal_state():
+    """A finished run keeps its shape, not its thousands of deltas.
+
+    agent_complete already carries the full text, so replaying the tokens that
+    built it buys a late subscriber nothing and costs the process a dict per
+    token for the lifetime of the server.
+    """
+    registry = server.RunRegistry()
+    run_id = registry.create("vector databases", None, None)
+    run = registry._require(run_id)
+
+    _publish_agent(registry, run, "scout", 1, ["gen", "er", "ated"], "generated")
+    registry._publish(run, {
+        "type": "pipeline_complete", "run_id": run_id,
+        "folder": "/tmp/x", "files": [], "missing_sections": [],
+    })
+
+    kinds = [event["type"] for event in registry.events(run_id)]
+    assert kinds == ["agent_start", "agent_complete", "pipeline_complete"]
+
+
+def test_compaction_preserves_the_completed_output():
+    registry = server.RunRegistry()
+    run_id = registry.create("vector databases", None, None)
+    run = registry._require(run_id)
+
+    _publish_agent(registry, run, "scout", 1, ["a", "b"], "the full brief")
+    registry._publish(run, {
+        "type": "pipeline_complete", "run_id": run_id,
+        "folder": "/tmp/x", "files": [], "missing_sections": [],
+    })
+
+    complete = [e for e in registry.events(run_id) if e["type"] == "agent_complete"]
+    assert complete[0]["output"] == "the full brief"
+    assert registry._require(run_id)["completed"]["research"] == "the full brief"
+
+
+def test_tokens_are_retained_while_the_run_is_still_going():
+    """Mid-run, a late subscriber still needs the partial text to catch up."""
+    registry = server.RunRegistry()
+    run_id = registry.create("vector databases", None, None)
+    run = registry._require(run_id)
+
+    _publish_agent(registry, run, "scout", 1, ["a", "b"], "ab")
+
+    kinds = [event["type"] for event in registry.events(run_id)]
+    assert kinds.count("agent_token") == 2
+
+
+def test_error_events_also_compact_but_keep_the_failure():
+    registry = server.RunRegistry()
+    run_id = registry.create("vector databases", None, None)
+    run = registry._require(run_id)
+
+    _publish_agent(registry, run, "scout", 1, ["a", "b"], "brief")
+    registry._publish(run, {
+        "type": "error", "message": "Ollama fell over", "hint": "ollama serve",
+        "agent": "architect", "step": 2, "completed": ["research"],
+    })
+
+    events = registry.events(run_id)
+    assert [e["type"] for e in events] == ["agent_start", "agent_complete", "error"]
+    assert events[-1]["message"] == "Ollama fell over"
+
+
+# --- Finished-run eviction ----------------------------------------------
+
+def test_finished_runs_are_evicted_once_the_cap_is_exceeded(monkeypatch):
+    monkeypatch.setattr(config, "MAX_RETAINED_RUNS", 3)
+    registry = server.RunRegistry()
+
+    ids = []
+    for index in range(5):
+        run_id = registry.create(f"topic {index}", None, None)
+        ids.append(run_id)
+        run = registry._require(run_id)
+        registry._publish(run, {
+            "type": "pipeline_complete", "run_id": run_id,
+            "folder": "/tmp/x", "files": [], "missing_sections": [],
+        })
+
+    for evicted in ids[:2]:
+        with pytest.raises(HTTPException):
+            registry.state(evicted)
+    for kept in ids[2:]:
+        assert registry.state(kept)["run_id"] == kept
+
+
+def test_eviction_never_drops_a_run_that_is_still_active(monkeypatch):
+    monkeypatch.setattr(config, "MAX_RETAINED_RUNS", 2)
+    registry = server.RunRegistry()
+
+    active = registry.create("still going", None, None)
+    registry._require(active)["status"] = "running"
+
+    for index in range(4):
+        run_id = registry.create(f"done {index}", None, None)
+        registry._publish(registry._require(run_id), {
+            "type": "pipeline_complete", "run_id": run_id,
+            "folder": "/tmp/x", "files": [], "missing_sections": [],
+        })
+
+    assert registry.state(active)["status"] == "running"
