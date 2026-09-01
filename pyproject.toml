@@ -29,6 +29,10 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The app is a set of top-level modules, not an installed package, so the repo
+# root has to be importable. `python -m pytest` adds the cwd and hides this;
+# a bare `pytest` does not, which is what CI runs.
+pythonpath = ["."]
 # Nothing in the suite touches the network or needs Ollama, so a run that
 # suddenly takes minutes means something is wrong, not slow.
 addopts = "-q"
