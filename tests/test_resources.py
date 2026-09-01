@@ -177,16 +177,10 @@ def test_fetch_allows_private_addresses_only_when_explicitly_enabled(monkeypatch
     _public_dns(monkeypatch, "127.0.0.1")
     monkeypatch.setattr(config, "ALLOW_PRIVATE_FETCH", True)
 
-    class FakeResponse:
-        content = b"<html><title>Local</title><body><p>intranet doc</p></body></html>"
-        text = content.decode()
-        is_redirect = False
-        is_permanent_redirect = False
-
-        def raise_for_status(self):
-            pass
-
-    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: FakeResponse())
+    html = b"<html><title>Local</title><body><p>intranet doc</p></body></html>"
+    monkeypatch.setattr(
+        resources.requests, "get", lambda *a, **k: _StreamedResponse([html])
+    )
     entry = resources.add("url", "http://localhost:8080/doc")
     assert entry["name"] == "Local"
 
@@ -199,17 +193,14 @@ def test_a_redirect_to_a_private_address_is_refused(monkeypatch):
     })
     monkeypatch.setattr(config, "ALLOW_PRIVATE_FETCH", False)
 
-    class Redirect:
-        content = b""
-        text = ""
-        is_redirect = True
-        is_permanent_redirect = False
-        headers = {"Location": "http://metadata.evil/latest/meta-data/"}
+    def redirect_to_metadata(*args, **kwargs):
+        hop = _StreamedResponse(
+            [b""], headers={"Location": "http://metadata.evil/latest/meta-data/"}
+        )
+        hop.is_redirect = True
+        return hop
 
-        def raise_for_status(self):
-            pass
-
-    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: Redirect())
+    monkeypatch.setattr(resources.requests, "get", redirect_to_metadata)
     with pytest.raises(ValueError) as excinfo:
         resources.add("url", "https://public.example/start")
     assert "private address" in str(excinfo.value).lower()
@@ -221,18 +212,11 @@ def test_redirects_are_not_followed_by_requests_itself(monkeypatch):
     _public_dns(monkeypatch)
     seen = {}
 
-    class FakeResponse:
-        content = b"<html><title>T</title><body><p>body text</p></body></html>"
-        text = content.decode()
-        is_redirect = False
-        is_permanent_redirect = False
-
-        def raise_for_status(self):
-            pass
+    html = b"<html><title>T</title><body><p>body text</p></body></html>"
 
     def fake_get(url, **kwargs):
         seen.update(kwargs)
-        return FakeResponse()
+        return _StreamedResponse([html])
 
     monkeypatch.setattr(resources.requests, "get", fake_get)
     resources.add("url", "https://example.dev/page")
@@ -242,17 +226,12 @@ def test_redirects_are_not_followed_by_requests_itself(monkeypatch):
 def test_a_redirect_loop_is_capped(monkeypatch):
     _public_dns(monkeypatch)
 
-    class Redirect:
-        content = b""
-        text = ""
-        is_redirect = True
-        is_permanent_redirect = False
-        headers = {"Location": "https://example.dev/again"}
+    def redirect_forever(*args, **kwargs):
+        hop = _StreamedResponse([b""], headers={"Location": "https://example.dev/again"})
+        hop.is_redirect = True
+        return hop
 
-        def raise_for_status(self):
-            pass
-
-    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: Redirect())
+    monkeypatch.setattr(resources.requests, "get", redirect_forever)
     with pytest.raises(ValueError) as excinfo:
         resources.add("url", "https://example.dev/start")
     assert "Too many redirects" in str(excinfo.value)
@@ -277,17 +256,12 @@ def test_url_extraction_turns_html_into_readable_text(monkeypatch):
     <p>Rerankers recover most of the loss.</p></body></html>
     """
 
-    class FakeResponse:
-        content = html.encode("utf-8")
-        text = html
-        is_redirect = False
-        is_permanent_redirect = False
-
-        def raise_for_status(self):
-            pass
-
     _public_dns(monkeypatch)
-    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: FakeResponse())
+    monkeypatch.setattr(
+        resources.requests,
+        "get",
+        lambda *a, **k: _StreamedResponse([html.encode("utf-8")]),
+    )
     entry = resources.add("url", "https://example.dev/hybrid")
 
     body = resources.safe_resource_path(entry["id"]).read_text(encoding="utf-8")
@@ -317,3 +291,134 @@ def test_scout_prompt_carries_sources_and_other_agents_do_not():
 
 def test_scout_prompt_unchanged_when_there_are_no_sources():
     assert "THE USER'S OWN SOURCES" not in prompts.user_prompt("scout", "rag", {}, "")
+
+
+# --- Fetch size cap ------------------------------------------------------
+
+class _StreamedResponse:
+    """A response that hands its body over in chunks, like requests does."""
+
+    is_redirect = False
+    is_permanent_redirect = False
+    encoding = "utf-8"
+
+    def __init__(self, chunks, headers=None, on_pull=None):
+        self._chunks = chunks
+        self.headers = headers or {}
+        self._on_pull = on_pull
+        self.closed = False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size=None):
+        for chunk in self._chunks:
+            if self._on_pull:
+                self._on_pull(chunk)
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+def test_an_oversized_page_is_refused_without_buffering_all_of_it(monkeypatch):
+    """The cap must stop the transfer, not measure it after it landed in RAM.
+
+    Checking len(response.content) only works once the whole body is already
+    in memory, so a 50 MB URL is a 50 MB allocation before the 5 MB limit is
+    ever consulted.
+    """
+    _public_dns(monkeypatch)
+    pulled = []
+    body = [b"x" * (1024 * 1024) for _ in range(50)]
+    response = _StreamedResponse(body, on_pull=pulled.append)
+    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: response)
+
+    with pytest.raises(ValueError, match="larger than 5 MB"):
+        resources.add("url", "https://example.dev/huge")
+
+    assert len(pulled) <= 6, (
+        f"read {len(pulled)} MB before giving up; the cap is 5 MB"
+    )
+
+
+def test_a_declared_oversize_content_length_is_refused_before_the_body_is_read(monkeypatch):
+    _public_dns(monkeypatch)
+
+    def must_not_be_read(chunk):
+        raise AssertionError("body was read despite an oversize Content-Length")
+
+    response = _StreamedResponse(
+        [b"x"],
+        headers={"Content-Length": str(6 * 1024 * 1024)},
+        on_pull=must_not_be_read,
+    )
+    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: response)
+
+    with pytest.raises(ValueError, match="larger than 5 MB"):
+        resources.add("url", "https://example.dev/declared-huge")
+
+
+def test_the_body_is_requested_as_a_stream(monkeypatch):
+    _public_dns(monkeypatch)
+    captured = {}
+    html = b"<html><title>Streamed</title><body><p>hello there</p></body></html>"
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs)
+        return _StreamedResponse([html])
+
+    monkeypatch.setattr(resources.requests, "get", fake_get)
+    entry = resources.add("url", "https://example.dev/page")
+
+    assert captured["stream"] is True
+    assert entry["name"] == "Streamed"
+
+
+def test_a_page_under_the_cap_still_reads_normally(monkeypatch):
+    _public_dns(monkeypatch)
+    html = b"<html><title>Small</title><body><p>BM25 plus dense retrieval.</p></body></html>"
+    monkeypatch.setattr(
+        resources.requests, "get", lambda *a, **k: _StreamedResponse([html])
+    )
+
+    entry = resources.add("url", "https://example.dev/small")
+    body = resources.safe_resource_path(entry["id"]).read_text(encoding="utf-8")
+    assert "BM25 plus dense retrieval." in body
+
+
+def test_a_redirect_response_is_closed_before_the_next_hop(monkeypatch):
+    """A streamed response holds its connection open until it is closed.
+
+    Only the final hop's body is read, so every redirect on the way would sit
+    on a connection until the garbage collector happened to reclaim it.
+    """
+    _public_dns(monkeypatch)
+    hop = _StreamedResponse([b""], headers={"Location": "https://example.dev/final"})
+    hop.is_redirect = True
+    final = _StreamedResponse(
+        [b"<html><title>Final</title><body><p>arrived at last</p></body></html>"]
+    )
+    queue = [hop, final]
+    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: queue.pop(0))
+
+    entry = resources.add("url", "https://example.dev/start")
+
+    assert entry["name"] == "Final"
+    assert hop.closed, "the redirect hop must be closed before the next request"
+    assert final.closed, "the final response must be closed once read"
+
+
+def test_a_failed_status_still_releases_the_connection(monkeypatch):
+    _public_dns(monkeypatch)
+
+    class Failing(_StreamedResponse):
+        def raise_for_status(self):
+            raise resources.requests.HTTPError("404 Not Found")
+
+    response = Failing([b""])
+    monkeypatch.setattr(resources.requests, "get", lambda *a, **k: response)
+
+    with pytest.raises(ValueError, match="Could not fetch"):
+        resources.add("url", "https://example.dev/missing")
+    assert response.closed, "a non-2xx response must be closed too"

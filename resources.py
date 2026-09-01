@@ -131,6 +131,35 @@ class _TextExtractor(HTMLParser):
 
 
 MAX_REDIRECTS = 4
+# Read granularity for the capped body read. Small enough that the cap is
+# enforced promptly, large enough not to churn on a normal-sized article.
+CHUNK_BYTES = 64 * 1024
+
+
+def _read_capped(response) -> bytes:
+    """Return the body, refusing anything over MAX_BYTES without buffering it.
+
+    The size has to be enforced *during* the transfer. Reading `response.content`
+    first and measuring afterwards means a 2 GB URL is a 2 GB allocation before
+    the 5 MB limit is ever consulted — an out-of-memory kill triggered by a
+    pasted link.
+    """
+    # A truthful Content-Length saves reading the body at all. A missing or
+    # malformed one proves nothing, so it just falls through to the real read.
+    declared = response.headers.get("Content-Length", "")
+    if declared.strip().isdigit() and int(declared) > MAX_BYTES:
+        raise ValueError("Page is larger than 5 MB.")
+
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=CHUNK_BYTES):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > MAX_BYTES:
+            raise ValueError("Page is larger than 5 MB.")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _assert_public_host(url: str) -> None:
@@ -192,25 +221,43 @@ def _fetch_url(url: str) -> tuple[str, str]:
                 timeout=(config.CONNECT_TIMEOUT, 30),
                 headers={"User-Agent": f"{config.APP_NAME}/1.0"},
                 allow_redirects=False,
+                # Streamed so the size cap can abort an oversized transfer
+                # instead of measuring it once it is already in memory.
+                stream=True,
             )
             if response.is_redirect or response.is_permanent_redirect:
                 location = response.headers.get("Location")
+                # Streamed responses hold their connection until closed, and
+                # only the final hop's body is ever read.
+                response.close()
                 if not location:
                     raise ValueError("Redirect without a destination.")
                 current = urljoin(current, location)
                 continue
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.RequestException:
+                response.close()
+                raise
             break
         else:
             raise ValueError(f"Too many redirects (more than {MAX_REDIRECTS}).")
     except requests.RequestException as exc:
         raise ValueError(f"Could not fetch {url}: {exc}") from exc
 
-    if len(response.content) > MAX_BYTES:
-        raise ValueError("Page is larger than 5 MB.")
+    try:
+        raw = _read_capped(response)
+    except requests.RequestException as exc:
+        raise ValueError(f"Could not fetch {url}: {exc}") from exc
+    finally:
+        response.close()
+
+    # `response.text` is unavailable on a streamed body, so decode by hand from
+    # the charset the server declared, falling back to UTF-8.
+    html = raw.decode(response.encoding or "utf-8", errors="replace")
 
     extractor = _TextExtractor()
-    extractor.feed(response.text)
+    extractor.feed(html)
     text = extractor.text()
     if not text:
         raise ValueError("Nothing readable found at that URL.")

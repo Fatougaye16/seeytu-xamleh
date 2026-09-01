@@ -55,6 +55,10 @@ ALLOW_PRIVATE_FETCH = os.getenv("ALLOW_PRIVATE_FETCH", "").strip() in {"1", "tru
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "127.0.0.1")
 MAX_CONCURRENT_RUNS = int(os.getenv("MAX_CONCURRENT_RUNS", "2"))
+# Finished runs stay in memory so the UI can re-attach and retry can resume.
+# They cannot stay forever: each holds four agent outputs. Oldest finished runs
+# are dropped past this cap; runs still in flight are never evicted.
+MAX_RETAINED_RUNS = int(os.getenv("MAX_RETAINED_RUNS", "50"))
 
 
 def find_free_port(start: int = PORT, attempts: int = 20) -> int:
