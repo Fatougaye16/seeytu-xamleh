@@ -1,0 +1,34 @@
+# Tooling configuration only. The app is run as plain scripts (`python run.py`),
+# not installed as a package, so there is no [project] table and no build backend.
+
+[tool.ruff]
+# 100 rather than the default 88: the existing code wraps around 92 and reflowing
+# it all would bury real changes in whitespace churn.
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+]
+ignore = [
+    "E501",  # line length is enforced by the formatter's 100, not per-line here
+    "B008",  # FastAPI's Depends()-in-defaults idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately build odd inputs and stub private helpers.
+"tests/*" = ["S101", "SLF001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Nothing in the suite touches the network or needs Ollama, so a run that
+# suddenly takes minutes means something is wrong, not slow.
+addopts = "-q"

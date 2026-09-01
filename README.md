@@ -158,10 +158,12 @@ name.**
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest tests/ -v
+ruff check .
 ```
 
 Nothing in the suite needs Ollama or a network — `call_model` is stubbed throughout, which is what
-keeps the fragile parts (writer splitting, slugification, path containment) cheap to verify.
+keeps the fragile parts (writer splitting, slugification, path containment) cheap to verify. The
+whole run takes a few seconds, so CI runs both of the above on every push and pull request.
 
 ## How it fits together
 

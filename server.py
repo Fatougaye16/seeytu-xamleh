@@ -108,6 +108,14 @@ class RunRegistry:
         }
         return run_id
 
+    def slot(self):
+        """The shared concurrency cap, for work that is not a full pipeline run.
+
+        A single-agent request loads a model just like a pipeline does, so it
+        has to queue behind the same limit rather than around it.
+        """
+        return self._semaphore
+
     def _require(self, run_id: str) -> dict:
         run = self._runs.get(run_id)
         if run is None:
@@ -285,19 +293,24 @@ async def run_single(request: SingleAgentRequest) -> dict:
     if not agent:
         raise HTTPException(status_code=422, detail=f"Unknown agent: {request.agent}")
     model, _ = agents.resolve_model(request.model)
-    try:
-        output = await asyncio.to_thread(
-            agents.run_agent,
-            agent,
-            request.topic,
-            {},
-            model=model,
-            temperature=(
-                config.TEMPERATURE if request.temperature is None else request.temperature
-            ),
-        )
-    except agents.OllamaError as exc:
-        raise HTTPException(status_code=502, detail={"message": str(exc), "hint": exc.hint})
+    # Bounded by the same cap as a pipeline run: this loads a model too.
+    async with registry.slot():
+        try:
+            output = await asyncio.to_thread(
+                agents.run_agent,
+                agent,
+                request.topic,
+                {},
+                model=model,
+                temperature=(
+                    config.TEMPERATURE if request.temperature is None
+                    else request.temperature
+                ),
+            )
+        except agents.OllamaError as exc:
+            raise HTTPException(
+                status_code=502, detail={"message": str(exc), "hint": exc.hint}
+            ) from exc
     return {"agent": agent, "output": output}
 
 
@@ -330,9 +343,9 @@ def get_run(run_id: str) -> dict:
     try:
         return runstore.read_run(run_id)
     except runstore.UnsafePath as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"No such run: {run_id}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No such run: {run_id}") from exc
 
 
 @app.get("/api/runs/{run_id}/archive")
@@ -346,7 +359,7 @@ def get_run_archive(run_id: str) -> Response:
     try:
         directory = runstore.safe_run_dir(run_id)
     except runstore.UnsafePath as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not directory.is_dir():
         raise HTTPException(status_code=404, detail=f"No such run: {run_id}")
 
@@ -373,7 +386,7 @@ def get_run_file(run_id: str, filename: str, plain: bool = False) -> str:
     try:
         path = runstore.safe_run_file(run_id, filename)
     except runstore.UnsafePath as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"No such file: {filename}")
 
@@ -388,7 +401,7 @@ def delete_run(run_id: str) -> dict:
     try:
         runstore.delete_run(run_id)
     except runstore.UnsafePath as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": run_id}
 
 
@@ -403,9 +416,9 @@ def add_resource(request: ResourceRequest) -> dict:
         return resources.add(request.kind, request.name, request.content)
     except resources.UnsupportedResource as exc:
         # 415: the request was well-formed, the format simply is not supported.
-        raise HTTPException(status_code=415, detail=str(exc))
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/resources/{resource_id}/toggle")
@@ -413,9 +426,11 @@ def toggle_resource(resource_id: str) -> dict:
     try:
         return resources.toggle(resource_id)
     except resources.UnsafeResource as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"No such resource: {resource_id}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"No such resource: {resource_id}"
+        ) from exc
 
 
 @app.delete("/api/resources/{resource_id}")
@@ -423,7 +438,7 @@ def delete_resource(resource_id: str) -> dict:
     try:
         resources.remove(resource_id)
     except resources.UnsafeResource as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": resource_id}
 
 

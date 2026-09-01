@@ -12,7 +12,9 @@ import ipaddress
 import json
 import re
 import socket
+import threading
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -69,11 +71,26 @@ def _load_index() -> list[dict]:
         return []
 
 
+# Guards every read-modify-write of index.json, and the file write that goes
+# with it. Without it two concurrent adds both read the same list, both append
+# to their own copy, and the second write silently drops the first resource
+# while leaving its markdown orphaned on disk.
+_INDEX_LOCK = threading.RLock()
+
+
 def _save_index(entries: list[dict]) -> None:
+    """Write index.json atomically: a torn write would lose the whole library."""
     _root().mkdir(parents=True, exist_ok=True)
-    _index_path().write_text(
+    target = _index_path()
+    staging = target.with_name(target.name + ".tmp")
+    staging.write_text(
         json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    try:
+        staging.replace(target)
+    except OSError:
+        staging.unlink(missing_ok=True)
+        raise
 
 
 def _mint_id(name: str, existing: set[str]) -> str:
@@ -162,8 +179,11 @@ def _read_capped(response) -> bytes:
     return b"".join(chunks)
 
 
-def _assert_public_host(url: str) -> None:
+def _assert_public_host(url: str) -> list | None:
     """Refuse URLs that resolve to anything but a public address.
+
+    Returns the vetted getaddrinfo answer so the caller can pin the connection
+    to it, or None when the check was skipped via ALLOW_PRIVATE_FETCH.
 
     A pasted link is untrusted input. Without this the server would happily
     fetch http://169.254.169.254/ (cloud metadata), http://localhost:11434
@@ -179,7 +199,7 @@ def _assert_public_host(url: str) -> None:
     if not host:
         raise ValueError("That URL has no host.")
     if config.ALLOW_PRIVATE_FETCH:
-        return
+        return None
 
     try:
         infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
@@ -205,26 +225,72 @@ def _assert_public_host(url: str) -> None:
                 f"That link points to a private address on your own network "
                 f"({address}), so it wasn't opened."
             )
+    return infos
+
+
+# One fetch at a time. _pinned_dns swaps a module-level global, so overlapping
+# fetches would restore each other's resolver. URL adds are rare and
+# user-initiated, so serialising them costs nothing.
+_FETCH_LOCK = threading.Lock()
+
+
+@contextmanager
+def _pinned_dns(host: str, infos: list | None):
+    """Make the transport reuse the answer `_assert_public_host` already vetted.
+
+    Without this the host is resolved twice — once by the check, once by the
+    connection — and a DNS answer that changes in between passes the check and
+    connects elsewhere. That is DNS rebinding, and it defeats the private-address
+    refusal entirely.
+
+    Interception happens at socket.getaddrinfo rather than by rewriting the URL
+    to an IP, so the Host header, virtual hosting and TLS certificate matching
+    all keep working on the real hostname. Only this one host is answered from
+    the pin; everything else falls through to the real resolver.
+    """
+    if infos is None:
+        yield
+        return
+
+    real = socket.getaddrinfo
+
+    def pinned(hostname, port, *args, **kwargs):
+        if hostname == host:
+            return infos
+        return real(hostname, port, *args, **kwargs)
+
+    socket.getaddrinfo = pinned
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real
 
 
 def _fetch_url(url: str) -> tuple[str, str]:
     """Return (title, markdown-ish text) for a page. Fetched once, then stored."""
+    # Serialised: _pinned_dns swaps a module-level global for the duration.
+    with _FETCH_LOCK:
+        return _fetch_url_locked(url)
+
+
+def _fetch_url_locked(url: str) -> tuple[str, str]:
     # Redirects are followed by hand so every hop is validated. Left to
     # requests, a public URL could redirect straight to a private one.
     current = url
     response = None
     try:
         for _ in range(MAX_REDIRECTS + 1):
-            _assert_public_host(current)
-            response = requests.get(
-                current,
-                timeout=(config.CONNECT_TIMEOUT, 30),
-                headers={"User-Agent": f"{config.APP_NAME}/1.0"},
-                allow_redirects=False,
-                # Streamed so the size cap can abort an oversized transfer
-                # instead of measuring it once it is already in memory.
-                stream=True,
-            )
+            infos = _assert_public_host(current)
+            with _pinned_dns(urlparse(current).hostname, infos):
+                response = requests.get(
+                    current,
+                    timeout=(config.CONNECT_TIMEOUT, 30),
+                    headers={"User-Agent": f"{config.APP_NAME}/1.0"},
+                    allow_redirects=False,
+                    # Streamed so the size cap can abort an oversized transfer
+                    # instead of measuring it once it is already in memory.
+                    stream=True,
+                )
             if response.is_redirect or response.is_permanent_redirect:
                 location = response.headers.get("Location")
                 # Streamed responses hold their connection until closed, and
@@ -265,9 +331,11 @@ def _fetch_url(url: str) -> tuple[str, str]:
 
 
 def add(kind: str, name: str, content: str | None = None) -> dict:
-    """Add a file, url or note. Returns the new index entry."""
-    entries = _load_index()
-    existing = {entry["id"] for entry in entries}
+    """Add a file, url or note. Returns the new index entry.
+
+    The body is resolved first and the index touched second, so a URL fetch —
+    up to 30 seconds — never holds the index lock and blocks the library.
+    """
     now = datetime.now()
 
     if kind == "file":
@@ -300,25 +368,32 @@ def add(kind: str, name: str, content: str | None = None) -> dict:
     if len(body.encode("utf-8")) > MAX_BYTES:
         raise ValueError("Content is larger than 5 MB.")
 
-    resource_id = _mint_id(label or kind, existing)
-    safe_resource_path(resource_id).parent.mkdir(parents=True, exist_ok=True)
-    safe_resource_path(resource_id).write_text(body, encoding="utf-8")
-
     words = word_count(body)
     # Built by hand rather than with %-d, which is not portable to Windows.
     added = f"{now:%b} {now.day}"
-    entry = {
-        "id": resource_id,
-        "kind": badge,
-        "name": label,
-        "source": name if kind == "url" else None,
-        "words": words,
-        "added_at": now.isoformat(timespec="seconds"),
-        "enabled": True,
-        "meta": f"{words:,} words · added {added}",
-    }
-    entries.append(entry)
-    _save_index(entries)
+
+    # One writer at a time from here on: minting an id, writing the file and
+    # appending to the index have to happen as a unit or ids collide and
+    # entries go missing.
+    with _INDEX_LOCK:
+        entries = _load_index()
+        resource_id = _mint_id(label or kind, {entry["id"] for entry in entries})
+        path = safe_resource_path(resource_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+        entry = {
+            "id": resource_id,
+            "kind": badge,
+            "name": label,
+            "source": name if kind == "url" else None,
+            "words": words,
+            "added_at": now.isoformat(timespec="seconds"),
+            "enabled": True,
+            "meta": f"{words:,} words · added {added}",
+        }
+        entries.append(entry)
+        _save_index(entries)
     return entry
 
 
@@ -328,21 +403,23 @@ def listing() -> list[dict]:
 
 def toggle(resource_id: str) -> dict:
     safe_resource_path(resource_id)  # validate before touching the index
-    entries = _load_index()
-    for entry in entries:
-        if entry["id"] == resource_id:
-            entry["enabled"] = not entry["enabled"]
-            _save_index(entries)
-            return entry
+    with _INDEX_LOCK:
+        entries = _load_index()
+        for entry in entries:
+            if entry["id"] == resource_id:
+                entry["enabled"] = not entry["enabled"]
+                _save_index(entries)
+                return entry
     raise KeyError(resource_id)
 
 
 def remove(resource_id: str) -> None:
     path = safe_resource_path(resource_id)
-    entries = [entry for entry in _load_index() if entry["id"] != resource_id]
-    _save_index(entries)
-    if path.is_file():
-        path.unlink()
+    with _INDEX_LOCK:
+        entries = [entry for entry in _load_index() if entry["id"] != resource_id]
+        _save_index(entries)
+        if path.is_file():
+            path.unlink()
 
 
 def enabled_context(max_chars: int = 24_000) -> str:

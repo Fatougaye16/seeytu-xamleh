@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -551,3 +553,50 @@ def test_eviction_never_drops_a_run_that_is_still_active(monkeypatch):
         })
 
     assert registry.state(active)["status"] == "running"
+
+
+# --- Single-agent concurrency -------------------------------------------
+
+def test_a_single_agent_run_holds_a_concurrency_slot(client, monkeypatch):
+    """/api/run/single ran outside the cap entirely.
+
+    MAX_CONCURRENT_RUNS is what stops a laptop being asked to hold several
+    models resident at once, but the single-agent endpoint never touched the
+    semaphore — so N browser tabs meant N concurrent generations regardless of
+    the setting.
+    """
+    held = []
+
+    # A cap of one makes "slot taken" observable: asyncio.Semaphore.locked()
+    # only reports True at zero remaining slots.
+    server.registry._semaphore = asyncio.Semaphore(1)
+
+    def fake_run_agent(agent, topic, prior, *, model, temperature, **kwargs):
+        held.append(server.registry._semaphore.locked())
+        return "single agent output"
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+
+    response = client.post(
+        "/api/run/single", json={"agent": "research", "topic": "vector databases"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["output"] == "single agent output"
+    assert held == [True], "the run must occupy a slot from the shared cap"
+
+
+def test_the_slot_is_released_when_a_single_agent_run_fails(client, monkeypatch):
+    server.registry._semaphore = asyncio.Semaphore(1)
+
+    def boom(*args, **kwargs):
+        raise agents.OllamaError("model gone", "ollama pull x")
+
+    monkeypatch.setattr(agents, "run_agent", boom)
+
+    response = client.post(
+        "/api/run/single", json={"agent": "research", "topic": "vector databases"}
+    )
+
+    assert response.status_code == 502
+    assert server.registry._semaphore.locked() is False, "a failure leaked the slot"
