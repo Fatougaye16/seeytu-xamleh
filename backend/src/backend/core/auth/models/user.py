@@ -1,7 +1,5 @@
 from sqlalchemy import Column, Integer, String, false, true
-from sqlalchemy.orm import declarative_base
-
-Base = declarative_base()
+from....db.database import Base
 
 class User(Base):
     __tablename__ = "users"

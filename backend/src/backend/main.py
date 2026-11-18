@@ -1,7 +1,8 @@
-
-
 from fastapi import FastAPI
-
+from sqlalchemy.orm import Session
+from .core.auth.endpoints import user
+from .db.database import SessionLocal, engine, Base
 app = FastAPI()
 
-app.get("/")(lambda: {"message": "Hello World"})
+Base.metadata.create_all(bind=engine)
+app.include_router(user.router)
