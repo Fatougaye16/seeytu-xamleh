@@ -5,14 +5,13 @@ from..models.user import User as UserModel
 from ..schemas.user import UserCreate, User
 from ....db.database import get_db
 from sqlalchemy.orm import Session
-from ..services.auth_service import hashed_password
+from ..services.auth_service import hashed_password, authenticate_user, create_access_token, get_current_user
 router = APIRouter()
 
 @router.post("/users/register", response_model=User, status_code=201)
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
     user.hashed_password = hashed_password(user.hashed_password)
     db_user = UserModel(
-        id= user.id,
         username=user.username,
         email=user.email,
         hashed_password=user.hashed_password,
@@ -24,3 +23,12 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_user)
     return db_user
+
+@router.post("/users/login")
+async def login_user(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = authenticate_user(db, user.username, user.hashed_password)
+    if not db_user:
+        return {"error": "Invalid username or password"}
+    access_token = create_access_token(data={"sub": db_user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
