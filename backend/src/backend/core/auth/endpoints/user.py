@@ -5,10 +5,12 @@ from..models.user import User as UserModel
 from ..schemas.user import UserCreate, User
 from ....db.database import get_db
 from sqlalchemy.orm import Session
+from ..services.auth_service import hashed_password
 router = APIRouter()
 
 @router.post("/users/register", response_model=User, status_code=201)
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
+    user.hashed_password = hashed_password(user.hashed_password)
     db_user = UserModel(
         id= user.id,
         username=user.username,
