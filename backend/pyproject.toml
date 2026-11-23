@@ -12,6 +12,7 @@ dependencies = [
     "pwdlib[argon2]>=0.4.2",
     "pydantic>=2.14.3",
     "pyjwt>=2.15.1",
+    "pypdf>=7.1.1",
     "sqlalchemy>=2.1.8",
 ]
 
