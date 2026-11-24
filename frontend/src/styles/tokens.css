@@ -1,0 +1,46 @@
+/* Baobab palette — from the redesign canvas. Every colour in the app comes from here. */
+:root {
+  --bg: #F4F7F2;
+  --surface: #FFFFFF;
+  --tint: #EAF1E7;
+  --tint-strong: #DFF0E5;
+  --note: #EEF3EB;
+  --line: #DCE5D8;
+  --line-strong: #C3D1BE;
+  --input-border: #869C8E;
+
+  --text: #12372A;
+  --body: #1E4434;
+  --secondary: #33503F;
+  --dim: #4E6358;
+
+  --accent: #1F7A4D;
+  --accent-hover: #186540;
+  --on-accent: #FFFFFF;
+  --accent-text: #155C39;
+  --accent-soft: rgba(31, 122, 77, 0.14);
+  --accent-soft-strong: rgba(31, 122, 77, 0.24);
+
+  --status-done-bg: #DFF0E5;  --status-done: #155C39;
+  --status-full-bg: #E2ECF8;  --status-full: #1E4F8A;
+  --status-abs-bg: #FCEFD6;   --status-abs: #8A5300;
+  --danger: #A63A2B;
+  --danger-bg: #FBE8E4;
+
+  --shadow-1: 0 1px 3px rgba(18, 55, 42, 0.08);
+  --shadow-2: 0 8px 24px rgba(18, 55, 42, 0.08);
+
+  --r-sm: 6px;
+  --r: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --pill: 999px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --t: 200ms var(--ease);
+
+  --sans: 'Lato', -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', Consolas, monospace;
+
+  --sidebar-w: 272px;
+}

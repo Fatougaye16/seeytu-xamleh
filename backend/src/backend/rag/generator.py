@@ -41,6 +41,7 @@ def _group_by_document(chunks: list[dict]) -> list[dict]:
                 "published": meta.get("published"),
                 "doi": meta.get("doi"),
                 "url": meta.get("landing_page_url") or meta.get("pdf_url"),
+                "content_type": meta.get("content_type"),  # "full_text" | "abstract"
                 "excerpts": [],
             }
         sources[doc_id]["excerpts"].append(chunk["text"])
@@ -79,5 +80,9 @@ async def generate_answer(question: str, chunks: list[dict]) -> dict:
 
     return {
         "answer": response.content,
-        "sources": [{k: v for k, v in s.items() if k != "excerpts"} for s in sources],
+        # `passage`: the closest excerpt used for this source, so the UI can show where a claim came from.
+        "sources": [
+            {**{k: v for k, v in s.items() if k != "excerpts"}, "passage": s["excerpts"][0]}
+            for s in sources
+        ],
     }
